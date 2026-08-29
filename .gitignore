@@ -1,0 +1,9 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.sqlite3
+!biwenger_data.sqlite3
+*.db
+.streamlit/secrets.toml
