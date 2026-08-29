@@ -282,7 +282,7 @@ with tab_team:
                 "en_alineacion": "En 11 titular",
                 "en_venta": "En venta",
             }
-        ).drop(columns=["id"])
+        ).drop(columns=["id", "position"])
         st.caption(f"Alineación: {team_data.get('lineup', {}).get('type', '?')}")
         st.dataframe(
             style_money(team_df, ["Precio", "Cláusula"]),
@@ -508,6 +508,7 @@ with tab_clauses:
                     "Posición": o.player.position_name,
                     "Precio mercado": o.player.price,
                     "Cláusula": o.clause,
+                    "Beneficio inmediato": (o.player.price - o.clause) if o.player.price else None,
                     "% vs. mercado": o.vs_market_pct,
                     "Tendencia (€/día)": o.trend_abs_per_day,
                     "Tendencia (%/día)": round(o.trend_pct_per_day, 2) if o.trend_pct_per_day is not None else None,
@@ -528,8 +529,8 @@ with tab_clauses:
                     style_table(
                         clauses_df,
                         money_columns=["Precio mercado", "Cláusula"],
-                        signed_money_columns=["Tendencia (€/día)"],
-                        trend_color_columns=["Tendencia (%/día)", "Tendencia (€/día)"],
+                        signed_money_columns=["Tendencia (€/día)", "Beneficio inmediato"],
+                        trend_color_columns=["Tendencia (%/día)", "Tendencia (€/día)", "Beneficio inmediato"],
                     ),
                     width='stretch',
                     height=550,
@@ -562,12 +563,12 @@ with tab_clauses:
                         "Posición": o.player.position_name,
                         "Precio mercado": o.player.price,
                         "Cláusula": o.clause,
+                        "Beneficio inmediato": (o.player.price - o.clause) if o.player.price else None,
                         "% vs. mercado": o.vs_market_pct,
                         "Tendencia (€/día)": o.trend_abs_per_day,
                         "Tendencia (%/día)": round(o.trend_pct_per_day, 2),
                         "Disponible": "Ya" if o.days_until_unlockable <= 0 else f"en {o.days_until_unlockable:.1f} días",
                         "Dueño actual": o.owner_name,
-                        "Beneficio inmediato": (o.player.price - o.clause) if o.player.price else None,
                     }
                     for o in arbitrage_opps
                 ]
@@ -611,6 +612,7 @@ with tab_clauses:
                         "Posición": o.player.position_name,
                         "Precio mercado": o.player.price,
                         "Cláusula": o.clause,
+                        "Beneficio inmediato": (o.player.price - o.clause) if o.player.price else None,
                         "% vs. mercado": o.vs_market_pct,
                         "Tendencia (€/día)": o.trend_abs_per_day,
                         "Tendencia (%/día)": round(o.trend_pct_per_day, 2),
@@ -630,8 +632,8 @@ with tab_clauses:
                     style_table(
                         combo_df,
                         money_columns=["Precio mercado", "Cláusula"],
-                        signed_money_columns=["Tendencia (€/día)"],
-                        trend_color_columns=["Tendencia (%/día)", "Tendencia (€/día)"],
+                        signed_money_columns=["Tendencia (€/día)", "Beneficio inmediato"],
+                        trend_color_columns=["Tendencia (%/día)", "Tendencia (€/día)", "Beneficio inmediato"],
                     ),
                     width='stretch',
                     height=400,
