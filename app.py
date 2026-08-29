@@ -71,6 +71,14 @@ def format_euro_signed(value) -> str:
     return f"{sign}{abs(value):,.0f} €".replace(",", ".")
 
 
+def format_pct(value) -> str:
+    """12.345 -> '+12.3%', -4.5 -> '-4.5%'. Un solo decimal en todas las
+    columnas de porcentaje del dashboard."""
+    if value is None or pd.isna(value):
+        return "-"
+    return f"{value:+.1f}%"
+
+
 def style_money(df: pd.DataFrame, columns: list[str]) -> "pd.io.formats.style.Styler":
     """Aplica format_euro a las columnas indicadas sin tocar los valores
     subyacentes: el orden numérico al hacer clic en la cabecera sigue siendo
@@ -95,16 +103,20 @@ def style_table(
     money_columns: Optional[list[str]] = None,
     signed_money_columns: Optional[list[str]] = None,
     trend_color_columns: Optional[list[str]] = None,
+    pct_columns: Optional[list[str]] = None,
 ) -> "pd.io.formats.style.Styler":
     """Versión ampliada de style_money: además de formatear importes en
-    euros, puede formatear columnas de variación con signo (+/-) y colorear
-    en verde/rojo columnas de tendencia (subiendo/bajando)."""
+    euros, puede formatear columnas de variación con signo (+/-), colorear
+    en verde/rojo columnas de tendencia (subiendo/bajando), y formatear
+    columnas de porcentaje con un solo decimal."""
     money_columns = [c for c in (money_columns or []) if c in df.columns]
     signed_money_columns = [c for c in (signed_money_columns or []) if c in df.columns]
     trend_color_columns = [c for c in (trend_color_columns or []) if c in df.columns]
+    pct_columns = [c for c in (pct_columns or []) if c in df.columns]
 
     fmt = {c: format_euro for c in money_columns}
     fmt.update({c: format_euro_signed for c in signed_money_columns})
+    fmt.update({c: format_pct for c in pct_columns})
     styler = df.style.format(fmt)
     if trend_color_columns:
         styler = styler.map(_trend_color, subset=trend_color_columns)
@@ -398,6 +410,7 @@ with tab_active_market:
                 money_columns=["Precio de venta", "Puja recomendada"],
                 signed_money_columns=["Tendencia (€/día)"],
                 trend_color_columns=["Tendencia (%/día)", "Tendencia (€/día)"],
+                pct_columns=["Tendencia (%/día)"],
             ),
             width='stretch',
             height=500,
@@ -531,6 +544,7 @@ with tab_clauses:
                         money_columns=["Precio mercado", "Cláusula"],
                         signed_money_columns=["Tendencia (€/día)", "Beneficio inmediato"],
                         trend_color_columns=["Tendencia (%/día)", "Tendencia (€/día)", "Beneficio inmediato"],
+                        pct_columns=["% vs. mercado", "Tendencia (%/día)"],
                     ),
                     width='stretch',
                     height=550,
@@ -579,6 +593,7 @@ with tab_clauses:
                         money_columns=["Cláusula", "Precio mercado", "Beneficio inmediato"],
                         signed_money_columns=["Tendencia (€/día)"],
                         trend_color_columns=["Tendencia (%/día)", "Tendencia (€/día)"],
+                        pct_columns=["% vs. mercado", "Tendencia (%/día)"],
                     ),
                     width='stretch',
                     height=350,
@@ -634,6 +649,55 @@ with tab_clauses:
                         money_columns=["Precio mercado", "Cláusula"],
                         signed_money_columns=["Tendencia (€/día)", "Beneficio inmediato"],
                         trend_color_columns=["Tendencia (%/día)", "Tendencia (€/día)", "Beneficio inmediato"],
+                        pct_columns=["% vs. mercado", "Tendencia (%/día)"],
+                    ),
+                    width='stretch',
+                    height=400,
+                )
+
+            st.divider()
+            st.markdown("#### Punto de mira: casi rentable y subiendo fuerte")
+            st.caption(
+                "Jugadores cuya cláusula está ya muy pegada al precio de mercado "
+                "(poco 'Beneficio inmediato' si la pagases hoy) pero que sube de "
+                "precio rápido cada día: en poco tiempo la cláusula se quedará "
+                "claramente por debajo del mercado. Mismo criterio de 'posición "
+                "combinada' que la tabla anterior, pero combinando el beneficio "
+                "inmediato mínimo con la tendencia máxima."
+            )
+            tight_margin_opps = [o for o in rising_opps if o.player.price is not None]
+            if not tight_margin_opps:
+                st.info("Ningún jugador con precio subiendo y datos suficientes con los filtros actuales.")
+            else:
+                tight_rows = [
+                    {
+                        "Jugador": o.player.name,
+                        "Equipo": o.player.team_name,
+                        "Posición": o.player.position_name,
+                        "Precio mercado": o.player.price,
+                        "Cláusula": o.clause,
+                        "Beneficio inmediato": o.player.price - o.clause,
+                        "% vs. mercado": o.vs_market_pct,
+                        "Tendencia (€/día)": o.trend_abs_per_day,
+                        "Tendencia (%/día)": round(o.trend_pct_per_day, 2),
+                        "Disponible": "Ya" if o.days_until_unlockable <= 0 else f"en {o.days_until_unlockable:.1f} días",
+                        "Score": o.score,
+                        "Dueño actual": o.owner_name,
+                    }
+                    for o in tight_margin_opps
+                ]
+                tight_df = pd.DataFrame(tight_rows)
+                rank_beneficio = tight_df["Beneficio inmediato"].rank(ascending=True)
+                rank_tendencia = tight_df["Tendencia (%/día)"].rank(ascending=False)
+                tight_df["Posición combinada"] = (rank_beneficio + rank_tendencia).round(1)
+                tight_df = tight_df.sort_values("Posición combinada")
+                st.dataframe(
+                    style_table(
+                        tight_df,
+                        money_columns=["Precio mercado", "Cláusula"],
+                        signed_money_columns=["Tendencia (€/día)", "Beneficio inmediato"],
+                        trend_color_columns=["Tendencia (%/día)", "Tendencia (€/día)", "Beneficio inmediato"],
+                        pct_columns=["% vs. mercado", "Tendencia (%/día)"],
                     ),
                     width='stretch',
                     height=400,
@@ -770,10 +834,10 @@ with tab_scouting:
                     "Ingreso total": stats["total_ingresado"],
                     "Precio medio fichaje": stats["precio_medio_compra"],
                     "% sobre mercado (medio)": (
-                        f"{stats['vs_market_medio_pct']:+.0f}%" if stats["vs_market_medio_pct"] is not None else "-"
+                        f"{stats['vs_market_medio_pct']:+.1f}%" if stats["vs_market_medio_pct"] is not None else "-"
                     ),
                     "Sobrepuja media en subastas": (
-                        f"{(stats['overpay_medio'] - 1) * 100:.0f}%" if stats["overpay_medio"] else "-"
+                        f"{(stats['overpay_medio'] - 1) * 100:.1f}%" if stats["overpay_medio"] else "-"
                     ),
                 }
             )
@@ -807,8 +871,8 @@ with tab_scouting:
                 "Jugador": t.jugador,
                 "Importe": t.price,
                 "A quién / de quién": t.contraparte,
-                "% sobre mercado": f"{t.vs_market_pct:+.0f}%" if t.vs_market_pct is not None else "-",
-                "Sobrepuja vs rivales": f"{(t.overpay_ratio - 1) * 100:+.0f}%" if t.overpay_ratio else "-",
+                "% sobre mercado": f"{t.vs_market_pct:+.1f}%" if t.vs_market_pct is not None else "-",
+                "Sobrepuja vs rivales": f"{(t.overpay_ratio - 1) * 100:+.1f}%" if t.overpay_ratio else "-",
             }
             for t in selected_user.transactions
         ]
