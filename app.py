@@ -118,6 +118,19 @@ def load_players():
     return parse_players(raw["data"])
 
 
+@st.cache_resource(ttl=1800)
+def get_authed_client(email: str, password: str, league_id: str | None) -> BiwengerClient:
+    """Cliente autenticado, compartido entre pestañas y reruns de Streamlit.
+
+    Sin esto, cada pestaña crea su propio BiwengerClient y hace login +
+    GET /account desde cero en cada rerun (Streamlit reejecuta el script
+    entero al cambiar de pestaña o tocar cualquier widget), lo que dispara
+    un 429 Too Many Requests de la API de Biwenger casi de inmediato."""
+    client = BiwengerClient(email, password, league_id=league_id)
+    client.login()
+    return client
+
+
 @st.cache_data(ttl=86400)
 def load_player_price_history(slug: str) -> list:
     """Histórico de precio de un jugador. Público, sin credenciales — se
@@ -253,7 +266,7 @@ with tab_team:
     st.subheader("Mi plantilla")
     try:
         settings = load_settings()
-        client = BiwengerClient(settings.email, settings.password, league_id=settings.league_id)
+        client = get_authed_client(settings.email, settings.password, settings.league_id)
         team_resp = client.get_my_team()
         team_data = team_resp.get("data", {})
 
@@ -293,7 +306,7 @@ with tab_active_market:
     st.caption("Jugadores en venta ahora mismo: libres del sistema o puestos por otros usuarios.")
     try:
         settings = load_settings()
-        client = BiwengerClient(settings.email, settings.password, league_id=settings.league_id)
+        client = get_authed_client(settings.email, settings.password, settings.league_id)
         market_resp = client.get_market()
         market_data = market_resp.get("data", {})
 
@@ -450,7 +463,7 @@ with tab_clauses:
     )
     try:
         settings = load_settings()
-        client = BiwengerClient(settings.email, settings.password, league_id=settings.league_id)
+        client = get_authed_client(settings.email, settings.password, settings.league_id)
         my_id = client.league_user_id
 
         within_days = st.slider("Ver cláusulas que se desbloqueen dentro de (días)", 0, 15, 3)
@@ -661,7 +674,7 @@ with tab_standings:
     st.subheader("Clasificación de la liga")
     try:
         settings = load_settings()
-        client = BiwengerClient(settings.email, settings.password, league_id=settings.league_id)
+        client = get_authed_client(settings.email, settings.password, settings.league_id)
         standings_resp = client.get_league_standings()
         rows = parse_standings(standings_resp.get("data", {}))
         standings_df = pd.DataFrame(rows).sort_values("position").drop(columns=["user_id"])
@@ -696,7 +709,7 @@ with tab_moves:
     )
     try:
         settings = load_settings()
-        client = BiwengerClient(settings.email, settings.password, league_id=settings.league_id)
+        client = get_authed_client(settings.email, settings.password, settings.league_id)
         moves = client.get_all_league_movements(page_size=50, max_pages=20)
 
         rows = parse_movements(moves, players_by_id)
@@ -737,7 +750,7 @@ with tab_scouting:
     )
     try:
         settings = load_settings()
-        client = BiwengerClient(settings.email, settings.password, league_id=settings.league_id)
+        client = get_authed_client(settings.email, settings.password, settings.league_id)
         moves = client.get_all_league_movements(page_size=50, max_pages=20)
         users_activity = build_user_activity(moves, players_by_id)
 
@@ -836,7 +849,7 @@ with tab_economy:
     )
     try:
         settings = load_settings()
-        client = BiwengerClient(settings.email, settings.password, league_id=settings.league_id)
+        client = get_authed_client(settings.email, settings.password, settings.league_id)
 
         round_events = client.get_round_results(page_size=50, max_pages=50)
         bonuses_by_user = round_bonuses_by_user(round_events)
