@@ -167,24 +167,24 @@ def players_to_dataframe(players) -> pd.DataFrame:
 st.title("⚽ Biwenger Bot — Análisis de mercado")
 
 (
-    tab_market,
-    tab_chollos,
-    tab_team,
-    tab_active_market,
     tab_clauses,
-    tab_standings,
+    tab_active_market,
+    tab_team,
+    tab_chollos,
     tab_moves,
+    tab_market,
+    tab_standings,
     tab_scouting,
     tab_economy,
 ) = st.tabs(
     [
-        "Catálogo LaLiga",
-        "Chollos (recomendaciones)",
-        "Mi plantilla",
-        "Mercado activo (liga)",
         "Cláusulas",
-        "Clasificación",
+        "Mercado activo (liga)",
+        "Mi plantilla",
+        "Chollos (recomendaciones)",
         "Movimientos de liga",
+        "Catálogo LaLiga",
+        "Clasificación",
         "Fichajes por usuario",
         "Economía",
     ]
@@ -506,15 +506,16 @@ with tab_clauses:
                     "Jugador": o.player.name,
                     "Equipo": o.player.team_name,
                     "Posición": o.player.position_name,
-                    "Dueño actual": o.owner_name,
-                    "Puntos": o.player.points,
+                    "Precio mercado": o.player.price,
                     "Cláusula": o.clause,
                     "% vs. mercado": o.vs_market_pct,
-                    "Tendencia (%/día)": round(o.trend_pct_per_day, 2) if o.trend_pct_per_day is not None else None,
                     "Tendencia (€/día)": o.trend_abs_per_day,
+                    "Tendencia (%/día)": round(o.trend_pct_per_day, 2) if o.trend_pct_per_day is not None else None,
                     "Disponible": "Ya" if o.days_until_unlockable <= 0 else f"en {o.days_until_unlockable:.1f} días",
                     "Score": o.score,
                     "Recomendación": o.recomendacion,
+                    "Dueño actual": o.owner_name,
+                    "Puntos": o.player.points,
                 }
                 for o in filtered_opps
             ]
@@ -526,7 +527,7 @@ with tab_clauses:
                 st.dataframe(
                     style_table(
                         clauses_df,
-                        money_columns=["Cláusula"],
+                        money_columns=["Precio mercado", "Cláusula"],
                         signed_money_columns=["Tendencia (€/día)"],
                         trend_color_columns=["Tendencia (%/día)", "Tendencia (€/día)"],
                     ),
@@ -559,14 +560,14 @@ with tab_clauses:
                         "Jugador": o.player.name,
                         "Equipo": o.player.team_name,
                         "Posición": o.player.position_name,
-                        "Dueño actual": o.owner_name,
-                        "Cláusula": o.clause,
                         "Precio mercado": o.player.price,
+                        "Cláusula": o.clause,
                         "% vs. mercado": o.vs_market_pct,
-                        "Tendencia (%/día)": round(o.trend_pct_per_day, 2),
                         "Tendencia (€/día)": o.trend_abs_per_day,
-                        "Beneficio inmediato": (o.player.price - o.clause) if o.player.price else None,
+                        "Tendencia (%/día)": round(o.trend_pct_per_day, 2),
                         "Disponible": "Ya" if o.days_until_unlockable <= 0 else f"en {o.days_until_unlockable:.1f} días",
+                        "Dueño actual": o.owner_name,
+                        "Beneficio inmediato": (o.player.price - o.clause) if o.player.price else None,
                     }
                     for o in arbitrage_opps
                 ]
@@ -608,13 +609,14 @@ with tab_clauses:
                         "Jugador": o.player.name,
                         "Equipo": o.player.team_name,
                         "Posición": o.player.position_name,
-                        "Dueño actual": o.owner_name,
+                        "Precio mercado": o.player.price,
                         "Cláusula": o.clause,
-                        "Score": o.score,
                         "% vs. mercado": o.vs_market_pct,
-                        "Tendencia (%/día)": round(o.trend_pct_per_day, 2),
                         "Tendencia (€/día)": o.trend_abs_per_day,
+                        "Tendencia (%/día)": round(o.trend_pct_per_day, 2),
                         "Disponible": "Ya" if o.days_until_unlockable <= 0 else f"en {o.days_until_unlockable:.1f} días",
+                        "Score": o.score,
+                        "Dueño actual": o.owner_name,
                     }
                     for o in rising_opps
                 ]
@@ -627,7 +629,7 @@ with tab_clauses:
                 st.dataframe(
                     style_table(
                         combo_df,
-                        money_columns=["Cláusula"],
+                        money_columns=["Precio mercado", "Cláusula"],
                         signed_money_columns=["Tendencia (€/día)"],
                         trend_color_columns=["Tendencia (%/día)", "Tendencia (€/día)"],
                     ),
