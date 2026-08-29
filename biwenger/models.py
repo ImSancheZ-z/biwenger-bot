@@ -5,11 +5,11 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 POSITION_NAMES = {
-    1: "Portero",
-    2: "Defensa",
-    3: "Centrocampista",
-    4: "Delantero",
-    5: "Entrenador",
+    1: "PT",
+    2: "DF",
+    3: "MC",
+    4: "DL",
+    5: "ENT",
 }
 
 STATUS_OK = "ok"
