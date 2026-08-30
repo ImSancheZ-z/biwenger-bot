@@ -320,6 +320,8 @@ with tab_team:
             price = r.get("price")
             locked_until = r.get("clause_locked_until")
             days_left = (locked_until - now_ts) / 86400 if locked_until else -999.0
+            player = players_by_id.get(r.get("id"))
+            trend_abs = price_trend_abs_per_day(load_player_price_history(player.slug)) if player and player.slug else None
             clause_rows.append(
                 {
                     "Nombre": r["name"],
@@ -329,6 +331,7 @@ with tab_team:
                     "Cláusula": clause,
                     "Beneficio inmediato": (price - clause) if price else None,
                     "% vs. mercado": round((clause / price - 1) * 100, 1) if price else None,
+                    "Tendencia (€/día)": trend_abs,
                     "Disponible para rivales": "Ya" if days_left <= 0 else f"en {days_left:.1f} días",
                     "_dias": days_left,
                 }
@@ -341,8 +344,8 @@ with tab_team:
                 style_table(
                     clause_status_df,
                     money_columns=["Precio mercado", "Cláusula"],
-                    signed_money_columns=["Beneficio inmediato"],
-                    trend_color_columns=["Beneficio inmediato"],
+                    signed_money_columns=["Beneficio inmediato", "Tendencia (€/día)"],
+                    trend_color_columns=["Beneficio inmediato", "Tendencia (€/día)"],
                     pct_columns=["% vs. mercado"],
                 ),
                 width='stretch',
