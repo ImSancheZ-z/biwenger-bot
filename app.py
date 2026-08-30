@@ -11,6 +11,7 @@ endpoint).
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -294,13 +295,59 @@ with tab_team:
                 "en_alineacion": "En 11 titular",
                 "en_venta": "En venta",
             }
-        ).drop(columns=["id", "position"])
+        ).drop(columns=["id", "position", "clause_locked_until"])
         st.caption(f"Alineación: {team_data.get('lineup', {}).get('type', '?')}")
         st.dataframe(
             style_money(team_df, ["Precio", "Cláusula"]),
             width='stretch',
             height=450,
         )
+
+        st.divider()
+        st.markdown("#### Estado de las cláusulas de mi plantilla")
+        st.caption(
+            "Días que faltan para que cualquier rival pueda pagar la cláusula de "
+            "cada jugador (robártelo), y diferencia entre el precio de mercado "
+            "actual y esa cláusula — cuanto mayor sea, más caro le saldría a un "
+            "rival robártelo respecto a lo que vale el jugador hoy."
+        )
+        now_ts = int(time.time())
+        clause_rows = []
+        for r in rows:
+            clause = r.get("clause")
+            if not clause:
+                continue
+            price = r.get("price")
+            locked_until = r.get("clause_locked_until")
+            days_left = (locked_until - now_ts) / 86400 if locked_until else -999.0
+            clause_rows.append(
+                {
+                    "Nombre": r["name"],
+                    "Equipo": r["team_name"],
+                    "Posición": r["position_name"],
+                    "Precio mercado": price,
+                    "Cláusula": clause,
+                    "Beneficio inmediato": (price - clause) if price else None,
+                    "% vs. mercado": round((clause / price - 1) * 100, 1) if price else None,
+                    "Disponible para rivales": "Ya" if days_left <= 0 else f"en {days_left:.1f} días",
+                    "_dias": days_left,
+                }
+            )
+        if not clause_rows:
+            st.info("Ninguno de tus jugadores tiene cláusula asignada.")
+        else:
+            clause_status_df = pd.DataFrame(clause_rows).sort_values("_dias").drop(columns=["_dias"])
+            st.dataframe(
+                style_table(
+                    clause_status_df,
+                    money_columns=["Precio mercado", "Cláusula"],
+                    signed_money_columns=["Beneficio inmediato"],
+                    trend_color_columns=["Beneficio inmediato"],
+                    pct_columns=["% vs. mercado"],
+                ),
+                width='stretch',
+                height=450,
+            )
 
         if team_data.get("market"):
             st.caption("Ofertas de venta abiertas")

@@ -7,3 +7,4 @@ venv/
 !biwenger_data.sqlite3
 *.db
 .streamlit/secrets.toml
+streamlit.log

@@ -169,6 +169,7 @@ def parse_my_team(user_data: dict[str, Any], players_by_id: dict[int, Player]) -
                 "points": player.points if player else None,
                 "price": player.price if player else None,
                 "clause": owner.get("clause"),
+                "clause_locked_until": owner.get("clauseLockedUntil"),
                 "en_alineacion": pid in lineup_ids,
                 "en_venta": pid in on_sale_ids,
             }
