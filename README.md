@@ -1,5 +1,46 @@
 # Biwenger Bot
 
+## Mercado: recomendador v2 (septiembre de 2026)
+
+El mercado activo separa el **importe competitivo** del **límite personal**.
+Normaliza la mayor oferta rival de cada subasta por el precio histórico anterior
+al día del cierre y excluye las ofertas propias. Si falta ese precio o la identidad
+del ofertante, omite la muestra. El precio anterior al cierre es una aproximación
+al valor de referencia, no el precio exacto de salida. El análisis asume que el
+tablón devuelve las ofertas perdedoras completas; no permite observar jugadores
+que nunca llegaron a adjudicarse.
+
+Los niveles conservador/equilibrado/agresivo usan cuantiles 50/65/80 con peso
+decreciente (semivida de 30 días). Con 12 muestras comparables usa posición y
+precio entre la mitad y el doble; si no, utiliza la liga. No son probabilidades
+calibradas de victoria. Los perfiles individuales de rivales quedan pendientes.
+
+Para reforzar plantilla combina puntos por partido y forma reciente (70/30),
+regulariza hacia 3 puntos con cinco partidos y ajusta la dificultad hasta un 10%.
+Compara con el efectivo disponible más débil de la posición; no optimiza el once.
+No propone jugadores en duda o no disponibles. Recalcula rendimiento/precio al
+importe competitivo. El límite admite un 5% extra por punto de mejora, hasta 20%.
+Estos parámetros son hipótesis iniciales, no un modelo deportivo entrenado.
+
+Para reventa usa un escenario a tres días conservando la mitad de la subida diaria
+y descontando un margen del 5%; no garantiza beneficio. La reserva de saldo es
+editable y el plan conjunto descuenta cada propuesta. Cuando existen ofertas
+pendientes, hay que introducir y confirmar su importe reservado: su formato no
+pudo verificarse porque no había ofertas en la auditoría. No se envía ninguna puja.
+
+Validación del 13/09/2026: 165 subastas recuperadas, 150 evaluables cronológicamente.
+V2 equilibrado superó la mayor oferta rival en el 64%, frente al 62% de la prima
+base v1; el exceso medio sobre el rival entre las superadas fue respectivamente
+12,58% y 10,06% del valor de referencia. No demuestra mayor eficiencia. La comparación
+v1 no reproduce los ajustes de plantilla, tendencia ni presupuesto histórico.
+Tampoco se reconstruyen puntos futuros ni rentabilidad. La clasificación por
+posición utiliza el catálogo disponible al ejecutar la auditoría.
+
+Ejecutar `python scripts/audit_market_v2.py` para repetir la auditoría de lectura
+(requiere credenciales). Pruebas: `python -m unittest discover -s tests -v`.
+La primera carga del mercado consulta los históricos de las subastas; se cachean
+24 horas y el tablón 10 minutos. El score antiguo sigue en Chollos y Cláusulas.
+
 Asistente local de análisis para Biwenger (LaLiga Fantasy): detecta jugadores
 con buena relación puntos/precio, guarda snapshots diarios de precios y los
 muestra en un dashboard de Streamlit.

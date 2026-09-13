@@ -49,6 +49,8 @@ class Player:
     next_fixture: Optional[Fixture] = None
     # Última variación diaria oficial del catálogo (priceIncrement).
     price_increment: Optional[int] = None
+    played_home: int = 0
+    played_away: int = 0
 
     @property
     def position_name(self) -> str:

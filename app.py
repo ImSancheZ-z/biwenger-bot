@@ -20,14 +20,6 @@ import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from analysis.bidding import (
-    compute_likely_starters,
-    compute_top_teams_by_value,
-    effective_premium,
-    historical_bid_premium,
-    price_trend_pct_per_day,
-    recommend_bid,
-)
 from analysis.clauses import find_clause_opportunities, score_opportunities
 from analysis.economy import (
     build_money_timeline,
@@ -36,6 +28,7 @@ from analysis.economy import (
     reconstruct_balances,
     round_bonuses_by_user,
 )
+from analysis.market_v2 import build_auctions, recommend as recommend_v2, backtest, allocate_budget
 from analysis.engine import rank_players
 from analysis.initial_budget import compute_initial_budget, find_season_start_date
 from analysis.scouting import build_user_activity, detect_tendencies, summarize_user
@@ -48,7 +41,6 @@ from biwenger.parse import (
     parse_my_team,
     parse_players,
     parse_standings,
-    squad_position_counts,
 )
 from biwenger.storage import Storage
 
@@ -134,6 +126,12 @@ def load_players():
     # Streamlit no invalida una función cacheada al cambiar sus dependencias
     # (parse_players/Player). Reconstruir aquí aplica siempre el modelo actual.
     return parse_players(load_competition_data())
+
+
+@st.cache_data(ttl=600)
+def load_auction_movements(email, password, league_id):
+    client = get_authed_client(email, password, league_id)
+    return client.get_all_league_movements(page_size=100)
 
 
 @st.cache_resource(ttl=1800)
@@ -384,134 +382,74 @@ with tab_active_market:
         col1.metric("Tu saldo", format_euro(balance))
         col2.metric("Puja máxima permitida", format_euro(max_bid))
 
-        # Para la puja recomendada necesitamos tu plantilla (qué posiciones te
-        # faltan) y el histórico real de subastas competidas de tu liga.
         my_team_resp = client.get_my_team()
-        my_squad_rows = parse_my_team(my_team_resp.get("data", {}), players_by_id)
-        position_counts = squad_position_counts(my_squad_rows)
-
-        movements = client.get_all_league_movements(page_size=50, max_pages=5)
-        observed_premium, n_samples = historical_bid_premium(movements)
-        premium, premium_note = effective_premium(observed_premium, n_samples)
-
-        top_teams = compute_top_teams_by_value(players)
-        likely_starters = compute_likely_starters(players)
-
+        squad_ids = [p["id"] for p in my_team_resp.get("data", {}).get("players", [])]
+        squad = [players_by_id[pid] for pid in squad_ids if pid in players_by_id]
+        mode = st.radio("Objetivo del fichaje", ["Reforzar plantilla", "Reventa"], horizontal=True)
+        risk = st.select_slider("Nivel de competencia historica", options=["Conservador", "Equilibrado", "Agresivo"], value="Equilibrado")
+        quantile = {"Conservador": .5, "Equilibrado": .65, "Agresivo": .8}[risk]
+        reserve = st.number_input("Saldo que quieres conservar (euros)", min_value=0, value=max(0, int(balance * .2)), step=10000)
+        offers = market_data.get("offers", []) or []
+        # Hasta verificar el esquema de ofertas, la reserva es explicita.
+        pending = st.number_input("Importe total de tus ofertas pendientes (euros)", min_value=0, value=0, step=10000)
+        verified = True
+        if offers:
+            st.warning("Hay ofertas pendientes. Revisa su importe total antes de calcular nuevas pujas.")
+            verified = st.checkbox("He revisado el importe de mis ofertas pendientes", value=False)
+        budget = max(0, balance - reserve - pending) if verified else 0
+        st.caption(f"Presupuesto conjunto para nuevas propuestas: {format_euro(budget)}. Se descuenta cada propuesta aceptada por el plan.")
+        movements = load_auction_movements(settings.email, settings.password, settings.league_id)
+        with st.spinner("Cruzando subastas con precios historicos..."):
+            samples, skipped = build_auctions(movements, players_by_id, client.league_user_id, load_player_price_history)
+        st.caption(f"{len(samples)} subastas utilizables; {skipped} omitidas por datos incompletos. El precio de referencia es anterior al dia del cierre.")
         rows = parse_market(market_data, players_by_id)
-
-        origen_filter = st.radio(
-            "Vendedor",
-            ["Todos", "Libres (sistema)", "De otros usuarios"],
-            horizontal=True,
-        )
-        if origen_filter == "Libres (sistema)":
-            rows = [r for r in rows if r["is_free_agent"]]
-        elif origen_filter == "De otros usuarios":
-            rows = [r for r in rows if not r["is_free_agent"]]
-
+        assessed = []
         for row in rows:
-            trend = None
             player = players_by_id.get(row["id"])
-            trend_abs = player.price_increment if player else None
-            if row["slug"]:
-                history = load_player_price_history(row["slug"])
-                trend = price_trend_pct_per_day(history)
-            is_exceptional = row["team_name"] in top_teams and row["id"] in likely_starters
-            rec = recommend_bid(
-                price=row["price_venta"],
-                is_free_agent=row["is_free_agent"],
-                score=row["score"],
-                balance=balance,
-                max_bid=max_bid,
-                premium=premium,
-                premium_note=premium_note,
-                position=row["position"],
-                my_squad_position_counts=position_counts,
-                trend_pct_per_day=trend,
-                is_exceptional=is_exceptional,
-            )
-            row["tendencia"] = round(trend, 2) if trend is not None else None
-            row["tendencia_abs"] = trend_abs
-            row["excepcional"] = is_exceptional
-            row["accion"] = rec.action
-            row["puja_recomendada"] = rec.amount
-            row["motivo"] = rec.reasoning
-
-        market_df = pd.DataFrame(rows).rename(
-            columns={
-                "name": "Nombre",
-                "team_name": "Equipo",
-                "position_name": "Posición",
-                "points": "Puntos",
-                "price_venta": "Precio de venta",
-                "ratio_pts_millon": "Pts/Millón",
-                "score": "Score chollo",
-                "tendencia": "Tendencia media (%/día)",
-                "tendencia_abs": "Variación diaria (€)",
-                "excepcional": "Top-5 + titular",
-                "vendedor": "Vendedor",
-                "hasta": "Hasta (timestamp)",
-                "accion": "Acción",
-                "puja_recomendada": "Puja recomendada",
-                "motivo": "Motivo",
-            }
-        ).drop(columns=["id", "slug", "position", "is_free_agent"])
-        st.caption(
-            "Ordenado por 'Score chollo'. La 'Puja recomendada' es una estimación v1 — "
-            "ver limitaciones en el desplegable de abajo. La variación diaria es el último cambio oficial de Biwenger; la tendencia media usa los últimos 7 registros del histórico."
-        )
-        st.dataframe(
-            style_table(
-                market_df.sort_values("Score chollo", ascending=False, na_position="last"),
-                money_columns=["Precio de venta", "Puja recomendada"],
-                signed_money_columns=["Variación diaria (€)"],
-                trend_color_columns=["Tendencia media (%/día)", "Variación diaria (€)"],
-                pct_columns=["Tendencia media (%/día)"],
-            ),
-            width='stretch',
-            height=500,
-        )
-
-        with st.expander("¿Cómo se calcula la puja recomendada? Limitaciones"):
-            st.markdown(
-                f"- **Prima de subasta usada ahora mismo**: {premium_note} "
-                f"(factor {premium:.2f}).\n"
-                "- **Venta directa de otro usuario** (precio fijo, sin subasta): "
-                "se recomienda comprar ya si el ratio puntos/precio es bueno; en "
-                "este caso no hay 'puja', se paga el precio pedido.\n"
-                "- **Jugador libre del sistema** (subasta a ciegas): la puja "
-                "sugerida es precio de salida × prima histórica de tu liga, con "
-                "un extra del 10% si te falta esa posición en tu plantilla.\n"
-                "- **Tope de prima: +12% por defecto, +20% como máximo excepcional.** "
-                "Un +20-30% no puede salir solo de combinar bonus menores — se "
-                "recorta al +12% salvo que el jugador sea de un equipo **top-5 por "
-                "valor de plantilla** (Barcelona, Real Madrid, Atlético, Villarreal, "
-                "Betis ahora mismo — más estable que mirar los puntos de estas "
-                "primeras jornadas) **y** sea titular habitual (aproximado: entre "
-                "los 11 con más puntos de su equipo esta temporada — no tenemos el "
-                "once real de los rivales). Columna 'Top-5 + titular' en la tabla.\n"
-                "- **Tope de saldo: nunca más del 40% de tu saldo disponible en un "
-                "único jugador**, para no quedarte sin margen el resto de la "
-                "jornada — se aplica tanto a pujas como a compras directas.\n"
-                "- **Tendencia de precio** (media de los últimos 7 días, vía el "
-                "histórico diario de precio de cada jugador): si un jugador está "
-                "cayendo con fuerza (≤ -1,5%/día) **no se recomienda pujar en "
-                "absoluto**, por buen ratio que tenga hoy — mañana valdrá menos y "
-                "tu inversión pierde valor con él. Si cae más suave se recorta un "
-                "5% la puja; si sube con fuerza (≥ +1%/día) se añade un 8%, porque "
-                "mañana costará más.\n"
-                "- La dificultad del próximo rival ya está incluida en el 'Score "
-                "chollo' (viene de `analysis/engine.py`). No se puede ir más allá "
-                "del próximo partido: la API pública de Biwenger solo expone la "
-                "jornada inmediatamente siguiente, no un calendario completo.\n"
-                "- **No se puede usar el saldo real de tus rivales**: la "
-                "configuración de tu liga tiene `balance: hidden` (lo fija el "
-                "administrador), así que ni la propia app de Biwenger se lo "
-                "enseña a nadie — no es una limitación nuestra, es la API.\n"
-                "- Es una v1 deliberadamente simple: cuantas más subastas "
-                "competidas se disputen en tu liga, más fiable será la prima "
-                "estimada."
-            )
+            rec = recommend_v2(player, row["price_venta"], squad, samples, int(time.time()),
+                               budget, max_bid, mode=mode, quantile=quantile, free=row["is_free_agent"])
+            assessed.append((row, player, rec))
+        # Orden fijo anterior al filtro de vendedor: mismo presupuesto en todas las vistas.
+        def proposal_priority(item):
+            rec = item[2]
+            if mode == "Reventa":
+                price = rec["competitive"]
+                return (rec["limit"] - price) / price if price else -1
+            return rec["score"] if rec["score"] is not None else -1
+        assessed.sort(key=proposal_priority, reverse=True)
+        allocate_budget([item[2] for item in assessed], budget)
+        output = []
+        for row, player, rec in assessed:
+            output.append({
+                "Nombre": row["name"], "Posicion": row["position_name"],
+                "Vendedor": row["vendedor"], "Precio de venta": row["price_venta"],
+                "Variaci\u00f3n diaria (\u20ac)": player.price_increment if player else None,
+                "Rendimiento/precio final": rec["score"], "Mejora estimada": rec["improvement"],
+                "Importe competitivo": rec["competitive"], "Limite personal": rec["limit"],
+                "Propuesta": rec["amount"], "Accion": rec["action"], "Confianza": rec["confidence"],
+                "Muestras": rec["samples"], "Motivo": rec["reason"],
+            })
+        seller_filter = st.radio("Vendedor", ["Todos", "Libres (sistema)", "De otros usuarios"], horizontal=True)
+        if seller_filter == "Libres (sistema)":
+            output = [r for r in output if r["Vendedor"] == "Libre (sistema)"]
+        elif seller_filter == "De otros usuarios":
+            output = [r for r in output if r["Vendedor"] != "Libre (sistema)"]
+        if output:
+            st.dataframe(style_table(pd.DataFrame(output),
+                money_columns=["Precio de venta", "Importe competitivo", "Limite personal", "Propuesta"],
+                signed_money_columns=["Variaci\u00f3n diaria (\u20ac)"],
+                trend_color_columns=["Variaci\u00f3n diaria (\u20ac)"]), width="stretch", height=500)
+        else:
+            st.info("No hay jugadores en el mercado.")
+        with st.expander("Metodo y validacion historica"):
+            st.write("La competencia usa el mayor importe rival dividido por el valor anterior al cierre, excluyendo tus ofertas. Prioriza misma posicion y precios entre la mitad y el doble si hay al menos 12 muestras; si no, usa la liga. El peso se reduce a la mitad cada 30 dias. Los niveles son cuantiles historicos, no probabilidades de ganar.")
+            st.write("Rendimiento: 70% media por partido y 30% forma reciente, regularizado con cinco partidos de 3 puntos y un ajuste de dificultad de hasta el 10%. Se compara con el efectivo disponible mas debil de la posicion; no optimiza el once. El limite deportivo permite un 5% extra por punto de mejora, hasta el 20%. Son hipotesis iniciales, no parametros entrenados.")
+            st.write("Reventa: escenario a tres dias con la mitad de la subida diaria y un margen del 5%. No garantiza ganancias ni incluye condiciones particulares de una futura venta. Para ventas de usuarios se muestra el precio pedido como oferta a valorar, sin presuponer compra inmediata.")
+            validation = backtest(samples)
+            st.write({"Subastas evaluadas cronologicamente": validation["evaluated"],
+                      "Fraccion de ofertas rivales superadas": validation["coverage"],
+                      "Exceso medio sobre rival / valor (solo superadas)": validation["excess"]})
+            st.caption("Validacion del nivel equilibrado con datos anteriores a cada cierre. No reconstruye plantilla, puntos ni saldo de entonces; no demuestra rentabilidad. La referencia anterior al cierre puede diferir del precio exacto de salida.")
 
         offers = market_data.get("offers", [])
         if offers:
