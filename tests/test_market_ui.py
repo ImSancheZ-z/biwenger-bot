@@ -11,6 +11,7 @@ class MarketUITests(unittest.TestCase):
         block = source[start:source.index("with tab_market:", start)]
         preamble = '''
 import streamlit as st
+import requests
 from unittest.mock import Mock
 from biwenger.client import BiwengerCatalogError
 load_competition_data = Mock()

@@ -1,4 +1,7 @@
 import unittest
+import ast
+from pathlib import Path
+from types import ModuleType
 from unittest.mock import Mock, patch
 import requests
 from biwenger.client import BiwengerClient, BiwengerCatalogError, CDN_BASE, AUTH_BASE
@@ -9,6 +12,16 @@ def response(status, payload=None):
 
 
 class CatalogTests(unittest.TestCase):
+    def test_app_import_works_with_pre_update_client_module(self):
+        source = (Path(__file__).resolve().parents[1] / "app.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        imports = [node for node in tree.body if isinstance(node, ast.ImportFrom)
+                   and node.module == "biwenger.client"]
+        old_module = ModuleType("biwenger.client")
+        old_module.BiwengerClient = object
+        with patch.dict("sys.modules", {"biwenger.client": old_module}):
+            exec(compile(ast.Module(body=imports, type_ignores=[]), "app.py", "exec"), {})
+
     def setUp(self):
         self.client = BiwengerClient("", "")
         self.payload = {"data": {"players": {"1": {"id": 1}}}}

@@ -35,6 +35,10 @@ class BiwengerAuthError(Exception):
 class BiwengerCatalogError(requests.RequestException):
     """Error público del catálogo, sin cuerpos de respuesta ni credenciales."""
 
+    def __init__(self, message):
+        super().__init__(message)
+        self.public_message = message
+
 
 @dataclass
 class ProbeResult:

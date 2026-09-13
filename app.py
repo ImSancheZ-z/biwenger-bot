@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Optional
 
 import pandas as pd
+import requests
 import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -32,7 +33,7 @@ from analysis.market_v2 import build_auctions, recommend as recommend_v2, backte
 from analysis.engine import rank_players
 from analysis.initial_budget import compute_initial_budget, find_season_start_date
 from analysis.scouting import build_user_activity, detect_tendencies, summarize_user
-from biwenger.client import BiwengerClient, BiwengerCatalogError
+from biwenger.client import BiwengerClient
 from biwenger.config import load_settings
 from biwenger.models import POSITION_NAMES
 from biwenger.parse import (
@@ -208,8 +209,12 @@ st.title("⚽ Biwenger Bot — Análisis de mercado")
 
 try:
     players = load_players()
-except BiwengerCatalogError as exc:
-    st.error(str(exc))
+except requests.RequestException as exc:
+    # Compatible también con el cliente previo a la actualización, que podía
+    # seguir cargado en el proceso y lanzar HTTPError directamente.
+    response = getattr(exc, "response", None)
+    status = f" (HTTP {response.status_code})" if response is not None else ""
+    st.error(getattr(exc, "public_message", f"No se pudo descargar el catálogo de Biwenger{status}."))
     st.info("Biwenger no ha permitido cargar el catálogo. Espera un momento y vuelve a intentarlo. Las recomendaciones necesitan esos datos actualizados.")
     if st.button("Reintentar carga del catálogo"):
         load_competition_data.clear()
