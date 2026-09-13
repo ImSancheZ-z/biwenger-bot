@@ -124,10 +124,16 @@ def style_table(
 
 
 @st.cache_data(ttl=600)
-def load_players():
+def load_competition_data():
+    """Cachea la respuesta de la API, no objetos Player de versiones anteriores."""
     client = BiwengerClient(email="", password="")
-    raw = client.get_competition_data()
-    return parse_players(raw["data"])
+    return client.get_competition_data()["data"]
+
+
+def load_players():
+    # Streamlit no invalida una función cacheada al cambiar sus dependencias
+    # (parse_players/Player). Reconstruir aquí aplica siempre el modelo actual.
+    return parse_players(load_competition_data())
 
 
 @st.cache_resource(ttl=1800)

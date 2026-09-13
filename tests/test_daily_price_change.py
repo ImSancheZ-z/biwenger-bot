@@ -1,4 +1,7 @@
+import ast
+from pathlib import Path
 import unittest
+from unittest.mock import Mock
 
 from analysis.bidding import price_trend_abs_per_day
 from analysis.clauses import ClauseOpportunity, score_opportunities
@@ -6,6 +9,25 @@ from biwenger.parse import parse_players
 
 
 class DailyPriceChangeTests(unittest.TestCase):
+    def test_cached_catalog_is_parsed_again_on_each_rerun(self):
+        # Carga solo esta función del dashboard, sin ejecutar la UI ni el login.
+        source = Path(__file__).resolve().parents[1] / "app.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+        loader = next(node for node in tree.body
+                      if isinstance(node, ast.FunctionDef) and node.name == "load_players")
+        self.assertEqual(loader.decorator_list, [], "No cachear objetos Player")
+        raw = {"players": {"15396": {
+            "id": 15396, "price": 2610000, "priceIncrement": 20000,
+        }}}
+        parser = Mock(wraps=parse_players)
+        namespace = {"load_competition_data": lambda: raw, "parse_players": parser}
+        exec(compile(ast.Module(body=[loader], type_ignores=[]), str(source), "exec"), namespace)
+        first = namespace["load_players"]()
+        second = namespace["load_players"]()
+        self.assertEqual(parser.call_count, 2)
+        self.assertIsNot(first[0], second[0])
+        self.assertEqual(second[0].price_increment, 20000)
+
     def player(self, **fields):
         return parse_players({"players": {"15396": {
             "id": 15396, "name": "Brugué", "slug": "roger-brugue",
