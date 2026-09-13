@@ -5,6 +5,25 @@ from streamlit.testing.v1 import AppTest
 
 
 class MarketUITests(unittest.TestCase):
+    def test_catalog_failure_shows_retry_without_traceback(self):
+        source = (Path(__file__).resolve().parents[1] / "app.py").read_text(encoding="utf-8")
+        start = source.index("try:\n    players = load_players()")
+        block = source[start:source.index("with tab_market:", start)]
+        preamble = '''
+import streamlit as st
+from unittest.mock import Mock
+from biwenger.client import BiwengerCatalogError
+load_competition_data = Mock()
+def load_players():
+    raise BiwengerCatalogError("Catalogo no disponible: HTTP 403")
+'''
+        app = AppTest.from_string(preamble + block).run(timeout=15)
+        self.assertEqual(len(app.exception), 0)
+        self.assertIn("HTTP 403", app.error[0].value)
+        self.assertEqual(len(app.button), 1)
+        app.button[0].click().run(timeout=15)
+        self.assertEqual(len(app.exception), 0)
+
     def test_market_controls_and_empty_history(self):
         source = (Path(__file__).resolve().parents[1] / "app.py").read_text(encoding="utf-8")
         helpers = source[source.index("def format_euro("):source.index("@st.cache_data(ttl=600)")]

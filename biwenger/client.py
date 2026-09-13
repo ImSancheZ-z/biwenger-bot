@@ -32,6 +32,10 @@ class BiwengerAuthError(Exception):
     """Fallo de login o token inválido/caducado."""
 
 
+class BiwengerCatalogError(requests.RequestException):
+    """Error público del catálogo, sin cuerpos de respuesta ni credenciales."""
+
+
 @dataclass
 class ProbeResult:
     url: str
@@ -149,14 +153,40 @@ class BiwengerClient:
         vuelve 403 "Forbidden" — confirmado empíricamente. Por eso aquí se
         manda una petición nueva con solo las cabeceras públicas.
         """
-        resp = requests.get(
-            f"{CDN_BASE}/competitions/{competition}/data",
-            params={"lang": "es", "score": score},
-            headers=DEFAULT_HEADERS,
-            timeout=20,
-        )
-        resp.raise_for_status()
-        return resp.json()
+        failures = []
+        # Ambos hosts sirven el mismo catálogo público (verificado 13/09/2026).
+        # Peticiones nuevas: nunca enviar Authorization/X-League/X-User.
+        for base in (CDN_BASE, AUTH_BASE):
+            host = base.split("/")[2]
+            try:
+                resp = requests.get(
+                    f"{base}/competitions/{competition}/data",
+                    params={"lang": "es", "score": score},
+                    headers=DEFAULT_HEADERS,
+                    timeout=20,
+                )
+            except (requests.ConnectionError, requests.Timeout):
+                failures.append(f"{host}: conexión no disponible")
+                continue
+            if resp.status_code != 200:
+                failures.append(f"{host}: HTTP {resp.status_code}")
+                # No insistir si el servicio pide reducir peticiones.
+                if resp.status_code == 429:
+                    break
+                if resp.status_code == 403 or resp.status_code >= 500:
+                    continue
+                break
+            try:
+                payload = resp.json()
+            except ValueError:
+                failures.append(f"{host}: respuesta no JSON")
+                continue
+            data = payload.get("data") if isinstance(payload, dict) else None
+            if not isinstance(data, dict) or not isinstance(data.get("players"), dict) or not data["players"]:
+                failures.append(f"{host}: catálogo vacío o inválido")
+                continue
+            return payload
+        raise BiwengerCatalogError("No se pudo descargar el catálogo de Biwenger. " + "; ".join(failures))
 
     def get_player_price_history(self, slug: str) -> list[list[int]]:
         """Histórico DIARIO de precio de un jugador, ~366 días. Público, sin

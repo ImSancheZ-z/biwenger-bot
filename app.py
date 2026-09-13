@@ -32,7 +32,7 @@ from analysis.market_v2 import build_auctions, recommend as recommend_v2, backte
 from analysis.engine import rank_players
 from analysis.initial_budget import compute_initial_budget, find_season_start_date
 from analysis.scouting import build_user_activity, detect_tendencies, summarize_user
-from biwenger.client import BiwengerClient
+from biwenger.client import BiwengerClient, BiwengerCatalogError
 from biwenger.config import load_settings
 from biwenger.models import POSITION_NAMES
 from biwenger.parse import (
@@ -206,7 +206,15 @@ st.title("⚽ Biwenger Bot — Análisis de mercado")
     ]
 )
 
-players = load_players()
+try:
+    players = load_players()
+except BiwengerCatalogError as exc:
+    st.error(str(exc))
+    st.info("Biwenger no ha permitido cargar el catálogo. Espera un momento y vuelve a intentarlo. Las recomendaciones necesitan esos datos actualizados.")
+    if st.button("Reintentar carga del catálogo"):
+        load_competition_data.clear()
+        st.rerun()
+    st.stop()
 
 with tab_market:
     st.subheader("Todos los jugadores de LaLiga")
