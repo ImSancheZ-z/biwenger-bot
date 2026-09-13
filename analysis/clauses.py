@@ -31,7 +31,6 @@ from analysis.bidding import (
     SCORE_THRESHOLD_GOOD,
     SCORE_THRESHOLD_MIN,
     TREND_HARD_STOP,
-    price_trend_abs_per_day,
     price_trend_pct_per_day,
 )
 from analysis.engine import score_at_price
@@ -107,6 +106,7 @@ def score_opportunities(opportunities: list[ClauseOpportunity], price_history_fe
     una versión cacheada de client.get_player_price_history) para no atar
     este módulo a una instancia concreta del cliente HTTP."""
     for opp in opportunities:
+        opp.trend_abs_per_day = opp.player.price_increment
         score, _, _, _ = score_at_price(opp.player, opp.clause)
         opp.score = round(score, 2)
 
@@ -116,7 +116,6 @@ def score_opportunities(opportunities: list[ClauseOpportunity], price_history_fe
         if opp.player.slug:
             history = price_history_fetcher(opp.player.slug)
             opp.trend_pct_per_day = price_trend_pct_per_day(history)
-            opp.trend_abs_per_day = price_trend_abs_per_day(history)
 
         opp.recomendacion = _classify(opp)
 

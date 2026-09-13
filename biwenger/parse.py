@@ -76,6 +76,7 @@ def parse_players(competition_data: dict[str, Any]) -> list[Player]:
                 points_away=raw.get("pointsAway", 0) or 0,
                 points_last_season=raw.get("pointsLastSeason", 0) or 0,
                 next_fixture=fixtures.get(team_id),
+                price_increment=raw.get("priceIncrement"),
             )
         )
     return players

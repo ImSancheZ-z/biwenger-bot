@@ -25,7 +25,6 @@ from analysis.bidding import (
     compute_top_teams_by_value,
     effective_premium,
     historical_bid_premium,
-    price_trend_abs_per_day,
     price_trend_pct_per_day,
     recommend_bid,
 )
@@ -321,7 +320,7 @@ with tab_team:
             locked_until = r.get("clause_locked_until")
             days_left = (locked_until - now_ts) / 86400 if locked_until else -999.0
             player = players_by_id.get(r.get("id"))
-            trend_abs = price_trend_abs_per_day(load_player_price_history(player.slug)) if player and player.slug else None
+            trend_abs = player.price_increment if player else None
             clause_rows.append(
                 {
                     "Nombre": r["name"],
@@ -331,7 +330,7 @@ with tab_team:
                     "Cláusula": clause,
                     "Beneficio inmediato": (price - clause) if price else None,
                     "% vs. mercado": round((clause / price - 1) * 100, 1) if price else None,
-                    "Tendencia (€/día)": trend_abs,
+                    "Variación diaria (€)": trend_abs,
                     "Disponible para rivales": "Ya" if days_left <= 0 else f"en {days_left:.1f} días",
                     "_dias": days_left,
                 }
@@ -344,8 +343,8 @@ with tab_team:
                 style_table(
                     clause_status_df,
                     money_columns=["Precio mercado", "Cláusula"],
-                    signed_money_columns=["Beneficio inmediato", "Tendencia (€/día)"],
-                    trend_color_columns=["Beneficio inmediato", "Tendencia (€/día)"],
+                    signed_money_columns=["Beneficio inmediato", "Variación diaria (€)"],
+                    trend_color_columns=["Beneficio inmediato", "Variación diaria (€)"],
                     pct_columns=["% vs. mercado"],
                 ),
                 width='stretch',
@@ -405,11 +404,12 @@ with tab_active_market:
             rows = [r for r in rows if not r["is_free_agent"]]
 
         for row in rows:
-            trend = trend_abs = None
+            trend = None
+            player = players_by_id.get(row["id"])
+            trend_abs = player.price_increment if player else None
             if row["slug"]:
                 history = load_player_price_history(row["slug"])
                 trend = price_trend_pct_per_day(history)
-                trend_abs = price_trend_abs_per_day(history)
             is_exceptional = row["team_name"] in top_teams and row["id"] in likely_starters
             rec = recommend_bid(
                 price=row["price_venta"],
@@ -440,8 +440,8 @@ with tab_active_market:
                 "price_venta": "Precio de venta",
                 "ratio_pts_millon": "Pts/Millón",
                 "score": "Score chollo",
-                "tendencia": "Tendencia (%/día)",
-                "tendencia_abs": "Tendencia (€/día)",
+                "tendencia": "Tendencia media (%/día)",
+                "tendencia_abs": "Variación diaria (€)",
                 "excepcional": "Top-5 + titular",
                 "vendedor": "Vendedor",
                 "hasta": "Hasta (timestamp)",
@@ -452,15 +452,15 @@ with tab_active_market:
         ).drop(columns=["id", "slug", "position", "is_free_agent"])
         st.caption(
             "Ordenado por 'Score chollo'. La 'Puja recomendada' es una estimación v1 — "
-            "ver limitaciones en el desplegable de abajo."
+            "ver limitaciones en el desplegable de abajo. La variación diaria es el último cambio oficial de Biwenger; la tendencia media usa los últimos 7 registros del histórico."
         )
         st.dataframe(
             style_table(
                 market_df.sort_values("Score chollo", ascending=False, na_position="last"),
                 money_columns=["Precio de venta", "Puja recomendada"],
-                signed_money_columns=["Tendencia (€/día)"],
-                trend_color_columns=["Tendencia (%/día)", "Tendencia (€/día)"],
-                pct_columns=["Tendencia (%/día)"],
+                signed_money_columns=["Variación diaria (€)"],
+                trend_color_columns=["Tendencia media (%/día)", "Variación diaria (€)"],
+                pct_columns=["Tendencia media (%/día)"],
             ),
             width='stretch',
             height=500,
@@ -573,8 +573,8 @@ with tab_clauses:
                     "Cláusula": o.clause,
                     "Beneficio inmediato": (o.player.price - o.clause) if o.player.price else None,
                     "% vs. mercado": o.vs_market_pct,
-                    "Tendencia (€/día)": o.trend_abs_per_day,
-                    "Tendencia (%/día)": round(o.trend_pct_per_day, 2) if o.trend_pct_per_day is not None else None,
+                    "Variación diaria (€)": o.trend_abs_per_day,
+                    "Tendencia media (%/día)": round(o.trend_pct_per_day, 2) if o.trend_pct_per_day is not None else None,
                     "Disponible": "Ya" if o.days_until_unlockable <= 0 else f"en {o.days_until_unlockable:.1f} días",
                     "Score": o.score,
                     "Recomendación": o.recomendacion,
@@ -592,9 +592,9 @@ with tab_clauses:
                     style_table(
                         clauses_df,
                         money_columns=["Precio mercado", "Cláusula"],
-                        signed_money_columns=["Tendencia (€/día)", "Beneficio inmediato"],
-                        trend_color_columns=["Tendencia (%/día)", "Tendencia (€/día)", "Beneficio inmediato"],
-                        pct_columns=["% vs. mercado", "Tendencia (%/día)"],
+                        signed_money_columns=["Variación diaria (€)", "Beneficio inmediato"],
+                        trend_color_columns=["Tendencia media (%/día)", "Variación diaria (€)", "Beneficio inmediato"],
+                        pct_columns=["% vs. mercado", "Tendencia media (%/día)"],
                     ),
                     width='stretch',
                     height=550,
@@ -629,21 +629,21 @@ with tab_clauses:
                         "Cláusula": o.clause,
                         "Beneficio inmediato": (o.player.price - o.clause) if o.player.price else None,
                         "% vs. mercado": o.vs_market_pct,
-                        "Tendencia (€/día)": o.trend_abs_per_day,
-                        "Tendencia (%/día)": round(o.trend_pct_per_day, 2),
+                        "Variación diaria (€)": o.trend_abs_per_day,
+                        "Tendencia media (%/día)": round(o.trend_pct_per_day, 2),
                         "Disponible": "Ya" if o.days_until_unlockable <= 0 else f"en {o.days_until_unlockable:.1f} días",
                         "Dueño actual": o.owner_name,
                     }
                     for o in arbitrage_opps
                 ]
-                arb_df = pd.DataFrame(arb_rows).sort_values("Tendencia (%/día)", ascending=False)
+                arb_df = pd.DataFrame(arb_rows).sort_values("Tendencia media (%/día)", ascending=False)
                 st.dataframe(
                     style_table(
                         arb_df,
                         money_columns=["Cláusula", "Precio mercado", "Beneficio inmediato"],
-                        signed_money_columns=["Tendencia (€/día)"],
-                        trend_color_columns=["Tendencia (%/día)", "Tendencia (€/día)"],
-                        pct_columns=["% vs. mercado", "Tendencia (%/día)"],
+                        signed_money_columns=["Variación diaria (€)"],
+                        trend_color_columns=["Tendencia media (%/día)", "Variación diaria (€)"],
+                        pct_columns=["% vs. mercado", "Tendencia media (%/día)"],
                     ),
                     width='stretch',
                     height=350,
@@ -679,8 +679,8 @@ with tab_clauses:
                         "Cláusula": o.clause,
                         "Beneficio inmediato": (o.player.price - o.clause) if o.player.price else None,
                         "% vs. mercado": o.vs_market_pct,
-                        "Tendencia (€/día)": o.trend_abs_per_day,
-                        "Tendencia (%/día)": round(o.trend_pct_per_day, 2),
+                        "Variación diaria (€)": o.trend_abs_per_day,
+                        "Tendencia media (%/día)": round(o.trend_pct_per_day, 2),
                         "Disponible": "Ya" if o.days_until_unlockable <= 0 else f"en {o.days_until_unlockable:.1f} días",
                         "Score": o.score,
                         "Dueño actual": o.owner_name,
@@ -688,7 +688,7 @@ with tab_clauses:
                     for o in rising_opps
                 ]
                 combo_df = pd.DataFrame(combo_rows)
-                rank_subida = combo_df["Tendencia (%/día)"].rank(ascending=False)
+                rank_subida = combo_df["Tendencia media (%/día)"].rank(ascending=False)
                 rank_score = combo_df["Score"].rank(ascending=False)
                 rank_descuento = combo_df["% vs. mercado"].rank(ascending=True)
                 combo_df["Posición combinada"] = (rank_subida + rank_score + rank_descuento).round(1)
@@ -697,9 +697,9 @@ with tab_clauses:
                     style_table(
                         combo_df,
                         money_columns=["Precio mercado", "Cláusula"],
-                        signed_money_columns=["Tendencia (€/día)", "Beneficio inmediato"],
-                        trend_color_columns=["Tendencia (%/día)", "Tendencia (€/día)", "Beneficio inmediato"],
-                        pct_columns=["% vs. mercado", "Tendencia (%/día)"],
+                        signed_money_columns=["Variación diaria (€)", "Beneficio inmediato"],
+                        trend_color_columns=["Tendencia media (%/día)", "Variación diaria (€)", "Beneficio inmediato"],
+                        pct_columns=["% vs. mercado", "Tendencia media (%/día)"],
                     ),
                     width='stretch',
                     height=400,
@@ -728,8 +728,8 @@ with tab_clauses:
                         "Cláusula": o.clause,
                         "Beneficio inmediato": o.player.price - o.clause,
                         "% vs. mercado": o.vs_market_pct,
-                        "Tendencia (€/día)": o.trend_abs_per_day,
-                        "Tendencia (%/día)": round(o.trend_pct_per_day, 2),
+                        "Variación diaria (€)": o.trend_abs_per_day,
+                        "Tendencia media (%/día)": round(o.trend_pct_per_day, 2),
                         "Disponible": "Ya" if o.days_until_unlockable <= 0 else f"en {o.days_until_unlockable:.1f} días",
                         "Score": o.score,
                         "Dueño actual": o.owner_name,
@@ -738,16 +738,16 @@ with tab_clauses:
                 ]
                 tight_df = pd.DataFrame(tight_rows)
                 rank_beneficio = tight_df["Beneficio inmediato"].rank(ascending=True)
-                rank_tendencia = tight_df["Tendencia (%/día)"].rank(ascending=False)
+                rank_tendencia = tight_df["Tendencia media (%/día)"].rank(ascending=False)
                 tight_df["Posición combinada"] = (rank_beneficio + rank_tendencia).round(1)
                 tight_df = tight_df.sort_values("Posición combinada")
                 st.dataframe(
                     style_table(
                         tight_df,
                         money_columns=["Precio mercado", "Cláusula"],
-                        signed_money_columns=["Tendencia (€/día)", "Beneficio inmediato"],
-                        trend_color_columns=["Tendencia (%/día)", "Tendencia (€/día)", "Beneficio inmediato"],
-                        pct_columns=["% vs. mercado", "Tendencia (%/día)"],
+                        signed_money_columns=["Variación diaria (€)", "Beneficio inmediato"],
+                        trend_color_columns=["Tendencia media (%/día)", "Variación diaria (€)", "Beneficio inmediato"],
+                        pct_columns=["% vs. mercado", "Tendencia media (%/día)"],
                     ),
                     width='stretch',
                     height=400,
