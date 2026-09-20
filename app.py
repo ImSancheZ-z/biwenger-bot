@@ -21,18 +21,28 @@ import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from analysis.bidding import (
+    compute_likely_starters,
+    compute_top_teams_by_value,
+    effective_premium,
+    historical_bid_premium,
+    price_trend_pct_per_day,
+    recommend_bid,
+)
 from analysis.clauses import find_clause_opportunities, score_opportunities
 from analysis.economy import (
+    REPORTED_BALANCES,
+    balance_summary,
     build_money_timeline,
+    clause_costs_by_user,
     cumulative_flow,
     net_cash_flow,
     reconstruct_balances,
     round_bonuses_by_user,
 )
-from analysis.market_v2 import build_auctions, recommend as recommend_v2, backtest, allocate_budget
 from analysis.engine import rank_players
 from analysis.initial_budget import compute_initial_budget, find_season_start_date
-from analysis.scouting import build_user_activity, detect_tendencies, summarize_user
+from analysis.scouting import UserActivity, build_user_activity, detect_tendencies, summarize_user
 from biwenger.client import BiwengerClient
 from biwenger.config import load_settings
 from biwenger.models import POSITION_NAMES
@@ -42,6 +52,7 @@ from biwenger.parse import (
     parse_my_team,
     parse_players,
     parse_standings,
+    squad_position_counts,
 )
 from biwenger.storage import Storage
 
@@ -129,12 +140,6 @@ def load_players():
     return parse_players(load_competition_data())
 
 
-@st.cache_data(ttl=600)
-def load_auction_movements(email, password, league_id):
-    client = get_authed_client(email, password, league_id)
-    return client.get_all_league_movements(page_size=100)
-
-
 @st.cache_resource(ttl=1800)
 def get_authed_client(email: str, password: str, league_id: str | None) -> BiwengerClient:
     """Cliente autenticado, compartido entre pestañas y reruns de Streamlit.
@@ -210,15 +215,10 @@ st.title("⚽ Biwenger Bot — Análisis de mercado")
 try:
     players = load_players()
 except requests.RequestException as exc:
-    # Compatible también con el cliente previo a la actualización, que podía
-    # seguir cargado en el proceso y lanzar HTTPError directamente.
     response = getattr(exc, "response", None)
     status = f" (HTTP {response.status_code})" if response is not None else ""
     st.error(getattr(exc, "public_message", f"No se pudo descargar el catálogo de Biwenger{status}."))
-    st.info("Biwenger no ha permitido cargar el catálogo. Espera un momento y vuelve a intentarlo. Las recomendaciones necesitan esos datos actualizados.")
-    if st.button("Reintentar carga del catálogo"):
-        load_competition_data.clear()
-        st.rerun()
+    st.info("Las consultas se pausan al recibir HTTP 429 durante al menos 10 minutos, o más si Biwenger lo indica. Vuelve a abrir la app después de ese plazo. Recargar no elimina la pausa y no garantiza que el servidor haya levantado el límite.")
     st.stop()
 
 with tab_market:
@@ -395,74 +395,134 @@ with tab_active_market:
         col1.metric("Tu saldo", format_euro(balance))
         col2.metric("Puja máxima permitida", format_euro(max_bid))
 
+        # Para la puja recomendada necesitamos tu plantilla (qué posiciones te
+        # faltan) y el histórico real de subastas competidas de tu liga.
         my_team_resp = client.get_my_team()
-        squad_ids = [p["id"] for p in my_team_resp.get("data", {}).get("players", [])]
-        squad = [players_by_id[pid] for pid in squad_ids if pid in players_by_id]
-        mode = st.radio("Objetivo del fichaje", ["Reforzar plantilla", "Reventa"], horizontal=True)
-        risk = st.select_slider("Nivel de competencia historica", options=["Conservador", "Equilibrado", "Agresivo"], value="Equilibrado")
-        quantile = {"Conservador": .5, "Equilibrado": .65, "Agresivo": .8}[risk]
-        reserve = st.number_input("Saldo que quieres conservar (euros)", min_value=0, value=max(0, int(balance * .2)), step=10000)
-        offers = market_data.get("offers", []) or []
-        # Hasta verificar el esquema de ofertas, la reserva es explicita.
-        pending = st.number_input("Importe total de tus ofertas pendientes (euros)", min_value=0, value=0, step=10000)
-        verified = True
-        if offers:
-            st.warning("Hay ofertas pendientes. Revisa su importe total antes de calcular nuevas pujas.")
-            verified = st.checkbox("He revisado el importe de mis ofertas pendientes", value=False)
-        budget = max(0, balance - reserve - pending) if verified else 0
-        st.caption(f"Presupuesto conjunto para nuevas propuestas: {format_euro(budget)}. Se descuenta cada propuesta aceptada por el plan.")
-        movements = load_auction_movements(settings.email, settings.password, settings.league_id)
-        with st.spinner("Cruzando subastas con precios historicos..."):
-            samples, skipped = build_auctions(movements, players_by_id, client.league_user_id, load_player_price_history)
-        st.caption(f"{len(samples)} subastas utilizables; {skipped} omitidas por datos incompletos. El precio de referencia es anterior al dia del cierre.")
+        my_squad_rows = parse_my_team(my_team_resp.get("data", {}), players_by_id)
+        position_counts = squad_position_counts(my_squad_rows)
+
+        movements = client.get_all_league_movements(page_size=50, max_pages=5)
+        observed_premium, n_samples = historical_bid_premium(movements)
+        premium, premium_note = effective_premium(observed_premium, n_samples)
+
+        top_teams = compute_top_teams_by_value(players)
+        likely_starters = compute_likely_starters(players)
+
         rows = parse_market(market_data, players_by_id)
-        assessed = []
+
+        origen_filter = st.radio(
+            "Vendedor",
+            ["Todos", "Libres (sistema)", "De otros usuarios"],
+            horizontal=True,
+        )
+        if origen_filter == "Libres (sistema)":
+            rows = [r for r in rows if r["is_free_agent"]]
+        elif origen_filter == "De otros usuarios":
+            rows = [r for r in rows if not r["is_free_agent"]]
+
         for row in rows:
+            trend = None
             player = players_by_id.get(row["id"])
-            rec = recommend_v2(player, row["price_venta"], squad, samples, int(time.time()),
-                               budget, max_bid, mode=mode, quantile=quantile, free=row["is_free_agent"])
-            assessed.append((row, player, rec))
-        # Orden fijo anterior al filtro de vendedor: mismo presupuesto en todas las vistas.
-        def proposal_priority(item):
-            rec = item[2]
-            if mode == "Reventa":
-                price = rec["competitive"]
-                return (rec["limit"] - price) / price if price else -1
-            return rec["score"] if rec["score"] is not None else -1
-        assessed.sort(key=proposal_priority, reverse=True)
-        allocate_budget([item[2] for item in assessed], budget)
-        output = []
-        for row, player, rec in assessed:
-            output.append({
-                "Nombre": row["name"], "Posicion": row["position_name"],
-                "Vendedor": row["vendedor"], "Precio de venta": row["price_venta"],
-                "Variaci\u00f3n diaria (\u20ac)": player.price_increment if player else None,
-                "Rendimiento/precio final": rec["score"], "Mejora estimada": rec["improvement"],
-                "Importe competitivo": rec["competitive"], "Limite personal": rec["limit"],
-                "Propuesta": rec["amount"], "Accion": rec["action"], "Confianza": rec["confidence"],
-                "Muestras": rec["samples"], "Motivo": rec["reason"],
-            })
-        seller_filter = st.radio("Vendedor", ["Todos", "Libres (sistema)", "De otros usuarios"], horizontal=True)
-        if seller_filter == "Libres (sistema)":
-            output = [r for r in output if r["Vendedor"] == "Libre (sistema)"]
-        elif seller_filter == "De otros usuarios":
-            output = [r for r in output if r["Vendedor"] != "Libre (sistema)"]
-        if output:
-            st.dataframe(style_table(pd.DataFrame(output),
-                money_columns=["Precio de venta", "Importe competitivo", "Limite personal", "Propuesta"],
-                signed_money_columns=["Variaci\u00f3n diaria (\u20ac)"],
-                trend_color_columns=["Variaci\u00f3n diaria (\u20ac)"]), width="stretch", height=500)
-        else:
-            st.info("No hay jugadores en el mercado.")
-        with st.expander("Metodo y validacion historica"):
-            st.write("La competencia usa el mayor importe rival dividido por el valor anterior al cierre, excluyendo tus ofertas. Prioriza misma posicion y precios entre la mitad y el doble si hay al menos 12 muestras; si no, usa la liga. El peso se reduce a la mitad cada 30 dias. Los niveles son cuantiles historicos, no probabilidades de ganar.")
-            st.write("Rendimiento: 70% media por partido y 30% forma reciente, regularizado con cinco partidos de 3 puntos y un ajuste de dificultad de hasta el 10%. Se compara con el efectivo disponible mas debil de la posicion; no optimiza el once. El limite deportivo permite un 5% extra por punto de mejora, hasta el 20%. Son hipotesis iniciales, no parametros entrenados.")
-            st.write("Reventa: escenario a tres dias con la mitad de la subida diaria y un margen del 5%. No garantiza ganancias ni incluye condiciones particulares de una futura venta. Para ventas de usuarios se muestra el precio pedido como oferta a valorar, sin presuponer compra inmediata.")
-            validation = backtest(samples)
-            st.write({"Subastas evaluadas cronologicamente": validation["evaluated"],
-                      "Fraccion de ofertas rivales superadas": validation["coverage"],
-                      "Exceso medio sobre rival / valor (solo superadas)": validation["excess"]})
-            st.caption("Validacion del nivel equilibrado con datos anteriores a cada cierre. No reconstruye plantilla, puntos ni saldo de entonces; no demuestra rentabilidad. La referencia anterior al cierre puede diferir del precio exacto de salida.")
+            trend_abs = player.price_increment if player else None
+            if row["slug"]:
+                history = load_player_price_history(row["slug"])
+                trend = price_trend_pct_per_day(history)
+            is_exceptional = row["team_name"] in top_teams and row["id"] in likely_starters
+            rec = recommend_bid(
+                price=row["price_venta"],
+                is_free_agent=row["is_free_agent"],
+                score=row["score"],
+                balance=balance,
+                max_bid=max_bid,
+                premium=premium,
+                premium_note=premium_note,
+                position=row["position"],
+                my_squad_position_counts=position_counts,
+                trend_pct_per_day=trend,
+                is_exceptional=is_exceptional,
+            )
+            row["tendencia"] = round(trend, 2) if trend is not None else None
+            row["tendencia_abs"] = trend_abs
+            row["excepcional"] = is_exceptional
+            row["accion"] = rec.action
+            row["puja_recomendada"] = rec.amount
+            row["motivo"] = rec.reasoning
+
+        market_df = pd.DataFrame(rows).rename(
+            columns={
+                "name": "Nombre",
+                "team_name": "Equipo",
+                "position_name": "Posición",
+                "points": "Puntos",
+                "price_venta": "Precio de venta",
+                "ratio_pts_millon": "Pts/Millón",
+                "score": "Score chollo",
+                "tendencia": "Tendencia media (%/día)",
+                "tendencia_abs": "Variación diaria (€)",
+                "excepcional": "Top-5 + titular",
+                "vendedor": "Vendedor",
+                "hasta": "Hasta (timestamp)",
+                "accion": "Acción",
+                "puja_recomendada": "Puja recomendada",
+                "motivo": "Motivo",
+            }
+        ).drop(columns=["id", "slug", "position", "is_free_agent"])
+        st.caption(
+            "Ordenado por 'Score chollo'. La 'Puja recomendada' es una estimación v1 — "
+            "ver limitaciones en el desplegable de abajo. La variación diaria es el último cambio oficial de Biwenger; la tendencia media usa los últimos 7 registros del histórico."
+        )
+        st.dataframe(
+            style_table(
+                market_df.sort_values("Score chollo", ascending=False, na_position="last"),
+                money_columns=["Precio de venta", "Puja recomendada"],
+                signed_money_columns=["Variación diaria (€)"],
+                trend_color_columns=["Tendencia media (%/día)", "Variación diaria (€)"],
+                pct_columns=["Tendencia media (%/día)"],
+            ),
+            width='stretch',
+            height=500,
+        )
+
+        with st.expander("¿Cómo se calcula la puja recomendada? Limitaciones"):
+            st.markdown(
+                f"- **Prima de subasta usada ahora mismo**: {premium_note} "
+                f"(factor {premium:.2f}).\n"
+                "- **Venta directa de otro usuario** (precio fijo, sin subasta): "
+                "se recomienda comprar ya si el ratio puntos/precio es bueno; en "
+                "este caso no hay 'puja', se paga el precio pedido.\n"
+                "- **Jugador libre del sistema** (subasta a ciegas): la puja "
+                "sugerida es precio de salida × prima histórica de tu liga, con "
+                "un extra del 10% si te falta esa posición en tu plantilla.\n"
+                "- **Tope de prima: +12% por defecto, +20% como máximo excepcional.** "
+                "Un +20-30% no puede salir solo de combinar bonus menores — se "
+                "recorta al +12% salvo que el jugador sea de un equipo **top-5 por "
+                "valor de plantilla** (Barcelona, Real Madrid, Atlético, Villarreal, "
+                "Betis ahora mismo — más estable que mirar los puntos de estas "
+                "primeras jornadas) **y** sea titular habitual (aproximado: entre "
+                "los 11 con más puntos de su equipo esta temporada — no tenemos el "
+                "once real de los rivales). Columna 'Top-5 + titular' en la tabla.\n"
+                "- **Tope de saldo: nunca más del 40% de tu saldo disponible en un "
+                "único jugador**, para no quedarte sin margen el resto de la "
+                "jornada — se aplica tanto a pujas como a compras directas.\n"
+                "- **Tendencia de precio** (media de los últimos 7 días, vía el "
+                "histórico diario de precio de cada jugador): si un jugador está "
+                "cayendo con fuerza (≤ -1,5%/día) **no se recomienda pujar en "
+                "absoluto**, por buen ratio que tenga hoy — mañana valdrá menos y "
+                "tu inversión pierde valor con él. Si cae más suave se recorta un "
+                "5% la puja; si sube con fuerza (≥ +1%/día) se añade un 8%, porque "
+                "mañana costará más.\n"
+                "- La dificultad del próximo rival ya está incluida en el 'Score "
+                "chollo' (viene de `analysis/engine.py`). No se puede ir más allá "
+                "del próximo partido: la API pública de Biwenger solo expone la "
+                "jornada inmediatamente siguiente, no un calendario completo.\n"
+                "- **No se puede usar el saldo real de tus rivales**: la "
+                "configuración de tu liga tiene `balance: hidden` (lo fija el "
+                "administrador), así que ni la propia app de Biwenger se lo "
+                "enseña a nadie — no es una limitación nuestra, es la API.\n"
+                "- Es una v1 deliberadamente simple: cuantas más subastas "
+                "competidas se disputen en tu liga, más fiable será la prima "
+                "estimada."
+            )
 
         offers = market_data.get("offers", [])
         if offers:
@@ -915,175 +975,115 @@ with tab_scouting:
         st.error(f"Error consultando la API: {exc}")
 
 with tab_economy:
-    st.subheader("Economía de la liga: cuánto dinero debería tener cada uno")
-    st.caption(
-        "Regla de esta liga: cada usuario empieza la temporada con 40.000.000 € "
-        "menos el valor de los jugadores que se le asignan en el reparto inicial "
-        "(precio EXACTO del día del reparto, no el de hoy). A partir de ahí, se "
-        "suma lo cobrado cada jornada y se resta/suma lo gastado/ingresado en fichajes."
-    )
+    st.subheader("Economía de la liga")
+    st.caption("Saldo estimado = 40.000.000 € − plantilla inicial + bonus + ventas − compras − blindajes.")
+    if st.button("Actualizar economía", key="refresh_economy"):
+        load_player_price_history.clear()
     try:
         settings = load_settings()
         client = get_authed_client(settings.email, settings.password, settings.league_id)
-
-        round_events = client.get_round_results(page_size=50, max_pages=50)
+        round_events = client.get_round_results()
         bonuses_by_user = round_bonuses_by_user(round_events)
-
-        moves = client.get_all_league_movements(page_size=50, max_pages=20)
+        moves = client.get_all_league_movements()
+        costs_by_user = clause_costs_by_user(moves, players_by_id)
         users_activity = build_user_activity(moves, players_by_id)
-
+        for entry in client.get_league_standings().get("data", {}).get("standings", []):
+            users_activity.setdefault(entry["id"], UserActivity(entry["id"], entry["name"]))
         my_id = client.league_user_id
         my_real_balance = client.get_market().get("data", {}).get("status", {}).get("balance")
-
-        my_roster_data = client.get_my_team()["data"]
-        season_start_date = find_season_start_date(my_roster_data["players"])
-
-        with st.spinner("Calculando el reparto inicial de cada usuario (histórico de precios)..."):
-            initial_budgets = {}
-            unresolved_users = []
+        users_activity.setdefault(my_id, UserActivity(my_id, "Mi cuenta"))
+        rosters = {}
+        roster_errors = {}
+        for uid in users_activity:
+            try:
+                response = client.get_my_team() if uid == my_id else client.get_other_user_roster(uid)
+                rosters[uid] = response["data"]["players"]
+            except Exception as exc:
+                roster_errors[uid] = str(exc)
+        # No depender de que nuestra cuenta conserve jugadores del reparto.
+        start_dates = [find_season_start_date(roster) for roster in rosters.values()]
+        season_start_date = min((date for date in start_dates if date is not None), default=None)
+        initial_budgets = {}
+        timelines = {}
+        rows = []
+        with st.spinner("Calculando saldos e histórico de precios..."):
             for uid, user in users_activity.items():
-                try:
-                    roster = my_roster_data if uid == my_id else client.get_other_user_roster(uid)["data"]
-                    initial_budgets[uid] = compute_initial_budget(
-                        roster["players"], user.transactions, players_by_id, load_player_price_history,
-                        season_start_date=season_start_date,
-                    )
-                except Exception:  # noqa: BLE001 — usuario fantasma (salió de la liga, roster 404) u otro fallo puntual
-                    initial_budgets[uid] = None
-                    unresolved_users.append(user.name)
-
-        if unresolved_users:
-            st.caption(
-                f"No se pudo calcular el reparto inicial de: {', '.join(unresolved_users)} "
-                "(probablemente ya no están en la liga). Para ellos se muestra solo el "
-                "flujo de caja neto, como antes."
-            )
-
-        my_predicted_initial = initial_budgets[my_id].initial_balance
-        my_timeline = build_money_timeline(my_id, bonuses_by_user.get(my_id, []), users_activity[my_id].transactions)
-        my_timeline_with_balance, _ = reconstruct_balances(my_timeline, my_predicted_initial)
-        my_projected_today = my_timeline_with_balance[-1][1] if my_timeline_with_balance else my_predicted_initial
-        my_gap = (my_real_balance - my_projected_today) if my_real_balance is not None else None
-
-        st.info(
-            f"Verificación con tu cuenta real: reparto inicial calculado = "
-            f"{format_euro(my_predicted_initial)}. Arrastrando esa cifra hasta hoy con "
-            f"tus bonus y fichajes reales, el modelo predice {format_euro(my_projected_today)} "
-            f"frente a tu saldo real de {format_euro(my_real_balance)} "
-            f"(diferencia: {format_euro(my_gap)}, explicada por "
-            f"{initial_budgets[my_id].missing_price_count} jugador(es) sin precio "
-            f"histórico recuperable — probablemente fuera del catálogo actual de LaLiga)."
-        )
-
-        overview_rows = []
-        for uid, user in users_activity.items():
-            bonus_events = bonuses_by_user.get(uid, [])
-            timeline = build_money_timeline(uid, bonus_events, user.transactions)
-            budget = initial_budgets[uid]
-            initial_balance = budget.initial_balance if budget else None
-            timeline_with_balance, _ = reconstruct_balances(timeline, initial_balance)
-            if timeline_with_balance:
-                saldo_estimado_hoy = timeline_with_balance[-1][1]
-            else:
-                saldo_estimado_hoy = initial_balance
-            is_me = uid == my_id
-            usuario_label = user.name + (" (tú)" if is_me else "") + ("" if budget else " (solo flujo neto)")
-            overview_rows.append(
-                {
-                    "Usuario": usuario_label,
-                    "Saldo inicial (reparto)": initial_balance,
-                    "Bonus cobrado": sum(e.delta for e in bonus_events),
-                    "Saldo estimado hoy": saldo_estimado_hoy if budget else net_cash_flow(timeline),
-                    "Saldo real (si se conoce)": my_real_balance if is_me else None,
+                budget = None
+                if uid in rosters and season_start_date is not None:
+                    try:
+                        budget = compute_initial_budget(
+                            rosters[uid], user.transactions, players_by_id,
+                            load_player_price_history, season_start_date=season_start_date,
+                        )
+                    except Exception as exc:
+                        roster_errors[uid] = str(exc)
+                initial_budgets[uid] = budget
+                timeline = build_money_timeline(uid, bonuses_by_user.get(uid, []), user.transactions, costs_by_user.get(uid, []))
+                timelines[uid] = timeline
+                initial = budget.initial_balance if budget else None
+                estimated = initial + net_cash_flow(timeline) if initial is not None else None
+                real = my_real_balance if uid == my_id else None
+                rows.append({
+                    "Usuario": user.name + (" (tú)" if uid == my_id else ""),
+                    "Saldo inicial (reparto)": initial,
+                    "Bonus": sum(e.delta for e in timeline if e.kind == "bonus"),
+                    "Ventas": sum(e.delta for e in timeline if e.kind == "venta"),
+                    "Compras": -sum(e.delta for e in timeline if e.kind == "compra"),
+                    "Blindajes": -sum(e.delta for e in timeline if e.kind == "blindaje"),
+                    "Flujo neto": net_cash_flow(timeline),
+                    "Saldo estimado hoy": estimated,
+                    **balance_summary(estimated, real, REPORTED_BALANCES.get(uid)),
+                    "Estado": (f"Provisional: {budget.missing_price_count} precios ausentes" if budget.missing_price_count else "Estimación") if budget else "Sin reparto calculable",
                     "_uid": uid,
-                }
-            )
-        overview_df = pd.DataFrame(overview_rows).sort_values("Saldo estimado hoy", ascending=False).reset_index(drop=True)
-        display_overview = overview_df.drop(columns=["_uid"])
-
-        st.caption("Haz clic en un usuario para ver su línea temporal de ingresos y gastos.")
-        money_overview_cols = ["Saldo inicial (reparto)", "Bonus cobrado", "Saldo estimado hoy", "Saldo real (si se conoce)"]
-        selection_event = st.dataframe(
-            style_money(display_overview, money_overview_cols),
-            width='stretch',
-            hide_index=True,
-            on_select="rerun",
-            selection_mode="single-row-required",
-            key="economy_overview_table",
-        )
-        selected_idx = selection_event.selection.rows[0] if selection_event.selection.rows else 0
-        selected_uid = overview_df.iloc[selected_idx]["_uid"]
-        selected_user = users_activity[selected_uid]
-        selected_is_me = selected_uid == my_id
-        selected_budget = initial_budgets[selected_uid]
-
+                })
+        overview_df = pd.DataFrame(rows).sort_values("Saldo actual", ascending=False, na_position="last").reset_index(drop=True)
+        first_cols = ["Usuario", "Saldo actual", "Tipo de saldo", "Saldo confirmado", "Fuente de confirmación"]
+        overview_df = overview_df[first_cols + [c for c in overview_df if c not in first_cols]]
+        st.caption("Saldo actual muestra el real consultado cuando está disponible y el calculado para los demás. Las confirmaciones comunicadas conservan su fecha. El margen de ±200.000 € sirve para comparar, no garantiza la precisión de todos los saldos. Sin reparto calculable, solo se muestra el flujo neto.")
+        st.caption(f"Consulta actualizada: {pd.Timestamp.now(tz='Europe/Madrid').strftime('%d/%m/%Y %H:%M:%S')}")
+        money_cols = ["Saldo actual", "Saldo confirmado", "Saldo inicial (reparto)", "Bonus", "Ventas", "Compras", "Blindajes", "Flujo neto", "Saldo estimado hoy", "Diferencia (real − estimado)"]
+        selection = st.dataframe(style_money(overview_df.drop(columns="_uid"), money_cols), width="stretch", hide_index=True,
+            on_select="rerun", selection_mode="single-row-required", key="economy_overview_table")
+        selected_idx = selection.selection.rows[0] if selection.selection.rows else 0
+        selected_idx = min(selected_idx, len(overview_df) - 1)
+        row = overview_df.iloc[selected_idx]
+        uid = int(row["_uid"])
+        budget = initial_budgets[uid]
+        timeline = timelines[uid]
         st.divider()
-        st.markdown(f"#### Línea temporal: {selected_user.name}{' (tú)' if selected_is_me else ''}")
-
-        bonus_events = bonuses_by_user.get(selected_uid, [])
-        timeline = build_money_timeline(selected_uid, bonus_events, selected_user.transactions)
-
-        if selected_budget:
-            st.caption(
-                f"Saldo inicial (reparto de temporada, {selected_budget.missing_price_count} jugador(es) "
-                f"sin precio histórico recuperable): {format_euro(selected_budget.initial_balance)}"
-            )
-            timeline_with_balance, _ = reconstruct_balances(timeline, selected_budget.initial_balance)
+        st.markdown(f"#### Cálculo de {users_activity[uid].name}")
+        st.write(f"{format_euro(row['Saldo inicial (reparto)'])} + {format_euro(row['Bonus'])} + {format_euro(row['Ventas'])} − {format_euro(row['Compras'])} − {format_euro(row['Blindajes'])} = {format_euro(row['Saldo estimado hoy'])}")
+        st.write(f"Saldo actual: {format_euro(row['Saldo actual'])} ({row['Tipo de saldo']}).")
+        if pd.notna(row['Saldo confirmado']):
+            st.info(f"Saldo confirmado: {format_euro(row['Saldo confirmado'])}. {row['Fuente de confirmación']}. Diferencia frente al cálculo: {format_euro(row['Diferencia (real − estimado)'])}. {row['Comparación ±200.000 €']}.")
+        if budget and budget.missing_price_count:
+            st.warning("Faltan precios del reparto: la estimación queda sobrevalorada por su valor desconocido. No puede darse por conciliada.")
+        if uid in roster_errors:
+            st.warning(f"No se ha podido completar el cálculo: {roster_errors[uid]}")
+        if season_start_date is None:
+            st.warning("No se pudo detectar la fecha del reparto inicial en las plantillas consultadas.")
+        if budget:
+            st.caption(f"Reparto detectado: {pd.to_datetime(budget.season_start_date, unit='s').strftime('%d/%m/%Y')}. Valor recuperado: {format_euro(budget.total_squad_value)}.")
+            with st.expander("Jugadores y precios del reparto inicial"):
+                squad_df = pd.DataFrame([{"Jugador": p.name, "Precio inicial": p.price_on_start_date} for p in budget.squad], columns=["Jugador", "Precio inicial"])
+                st.dataframe(style_money(squad_df, ["Precio inicial"]), hide_index=True)
+            balances, _ = reconstruct_balances(timeline, budget.initial_balance)
             balance_col = "Saldo estimado"
         else:
-            st.caption(
-                "No se pudo calcular su reparto inicial (probablemente ya no está en la "
-                "liga y su plantilla ya no es consultable). Se muestra el flujo de caja "
-                "neto acumulado, empezando en 0 — no es su saldo absoluto."
-            )
-            timeline_with_balance = cumulative_flow(timeline)
+            balances = cumulative_flow(timeline)
             balance_col = "Flujo acumulado"
-
-        timeline_rows = [
-            {
-                "Fecha": pd.to_datetime(ev.date, unit="s"),
-                "Tipo": {"bonus": "Bono de jornada", "compra": "Fichaje", "venta": "Venta"}[ev.kind],
-                "Detalle": ev.label,
-                "Importe": ev.delta,
-                balance_col: bal,
-            }
-            for ev, bal in timeline_with_balance
-        ]
-        timeline_df = pd.DataFrame(timeline_rows)
-        st.dataframe(
-            style_money(timeline_df, ["Importe", balance_col]),
-            width='stretch',
-            height=450,
-        )
-
-        chart_df = timeline_df[["Fecha", "Saldo estimado"]].set_index("Fecha")
-        st.line_chart(chart_df)
-
-        with st.expander("¿Cómo de fiable es esto? Metodología y límites"):
-            st.markdown(
-                "- **Presupuesto inicial**: 40.000.000 € menos el valor de la plantilla "
-                "inicial de cada usuario, valorada al precio EXACTO del día del reparto "
-                "(histórico diario de `GET /players/la-liga/{slug}?fields=prices`, "
-                "~366 días hacia atrás), no al precio de hoy.\n"
-                "- **Cómo se detecta la plantilla inicial de cada usuario**: jugadores de "
-                "su plantilla actual sin precio de compra registrado (`owner.price` "
-                "ausente) + jugadores que vendió sin haberlos comprado nunca (también "
-                "venían del reparto).\n"
-                "- **Verificado contra un caso real**: usando esta metodología contra la "
-                "cuenta del usuario (cuyo saldo real de hoy sí se conoce vía `/market`), "
-                "el saldo inicial calculado reprodujo el saldo real con un margen de "
-                "~600.000 € sobre una plantilla de ~26M€ (≈1,5%), explicado por un único "
-                "jugador ya fuera del catálogo actual de LaLiga del que no se pudo "
-                "recuperar precio histórico — no por un fallo del método.\n"
-                "- **Para el resto de usuarios no hay forma de verificar el resultado "
-                "final** (su saldo real está oculto por `settings.balance = hidden`), "
-                "así que ese mismo ~1-2% de margen por jugadores sin precio recuperable "
-                "es la mejor estimación de precisión disponible, no una certeza."
-            )
+        timeline_df = pd.DataFrame([{"Fecha": pd.to_datetime(e.date, unit="s"), "Tipo": e.kind, "Detalle": e.label, "Importe": e.delta, balance_col: value} for e, value in balances], columns=["Fecha", "Tipo", "Detalle", "Importe", balance_col])
+        if timeline_df.empty:
+            st.info("Sin movimientos registrados.")
+        else:
+            st.dataframe(style_money(timeline_df, ["Importe", balance_col]), width="stretch", height=450)
+            st.line_chart(timeline_df.set_index("Fecha")[[balance_col]])
+        with st.expander("Metodología y límites"):
+            st.write("Se parte de un presupuesto de 40 millones y se resta el valor histórico del reparto. Las ventas anteriores a cualquier compra también identifican jugadores iniciales, aunque luego se recompren. Se añaden bonus y ventas y se descuentan compras y subidas de cláusula. Los precios ausentes, movimientos no recogidos o ajustes del administrador pueden producir diferencias. Una comprobación histórica no garantiza un margen de error fijo para todos los usuarios.")
     except RuntimeError as exc:
-        st.warning(f"Configura tu .env para ver esto: {exc}")
-    except Exception as exc:  # noqa: BLE001
-        st.error(f"Error consultando la API: {exc}")
+        st.warning(str(exc))
+    except Exception as exc:
+        st.error(f"No se pudo actualizar la economía: {exc}")
 
 st.divider()
 with Storage() as storage:

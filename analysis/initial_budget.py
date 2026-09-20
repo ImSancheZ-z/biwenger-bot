@@ -1,34 +1,10 @@
-"""Reconstruye el reparto inicial de plantilla de cada usuario y, con eso,
-su saldo inicial real de temporada — usando el precio HISTÓRICO exacto del
-día del reparto, no el precio de catálogo de hoy.
+"""Estima el saldo inicial: 40M menos los precios históricos del reparto.
 
-Regla de esta liga (aportada por el usuario, verificada empíricamente
-contra su propio saldo real conocido): cada usuario empieza la temporada
-con un presupuesto de 40.000.000 €, del que se resta el valor (precio de
-aquel día) de los jugadores que se le asignan en el reparto inicial.
-
-Verificación hecha (2026-08-28, cuenta real del usuario): usando el precio
-de HOY para valorar la plantilla inicial, el saldo inicial predicho fallaba
-por 14,23M€ frente al saldo real conocido — porque faltaban jugadores
-vendidos sin haber sido comprados (también forman parte del reparto) y
-porque los precios llevan ~3 semanas moviéndose. Sumando esos jugadores
-vendidos, el fallo bajó a 1,98M€. Usando además el precio EXACTO del día
-del reparto (histórico diario de `GET /players/la-liga/{slug}?fields=prices`,
-366 días hacia atrás) el fallo bajó a 0,6M€ — y ese resto se explica por un
-único jugador (#37714) que ya no aparece en el catálogo de LaLiga (fuera de
-competición), no por un fallo del método.
-
-Cómo se detecta qué jugadores fueron parte del reparto inicial de un
-usuario (no hay un endpoint que lo diga directamente):
-- Jugadores de su plantilla ACTUAL que no tienen "owner.price" en la
-  respuesta de GET /user/{id} → nunca han sido comprados/vendidos por él,
-  siguen desde el reparto.
-- Jugadores que aparecen como VENTA suya en el tablón pero nunca como
-  COMPRA suya → los tenía desde el reparto y los vendió después.
-
-La fecha del reparto se detecta automáticamente: es la fecha compartida por
-TODOS los jugadores "sin owner.price" de la plantilla actual (se comprobó
-que es exactamente la misma para todos, dentro de una misma plantilla).
+La plantilla inicial incluye jugadores actuales sin owner.price o con precio cero y jugadores
+cuya primera operación registrada es una venta, aunque luego se recompren.
+La fecha se busca entre las plantillas disponibles de la liga. Los precios
+no recuperables no se inventan: se cuentan como ausentes y hacen que el
+saldo resultante sea provisional y esté sobrevalorado por su importe.
 """
 from __future__ import annotations
 
@@ -67,11 +43,11 @@ def find_season_start_date(roster_players: list[dict[str, Any]]) -> Optional[int
     """roster_players = user_data["players"] de GET /user/{id} (o
     get_my_team/get_other_user_roster). Devuelve el timestamp unix del
     reparto inicial: la fecha más común entre los jugadores sin
-    "owner.price" (si todos son distintos, no hay reparto detectable)."""
+    "owner.price" o con precio cero (si todos son distintos, no hay reparto detectable)."""
     dates = [
         entry["owner"]["date"]
         for entry in roster_players
-        if "price" not in (entry.get("owner") or {}) and "date" in (entry.get("owner") or {})
+        if (entry.get("owner") or {}).get("price") in (None, 0) and "date" in (entry.get("owner") or {})
     ]
     if not dates:
         return None
@@ -81,15 +57,17 @@ def find_season_start_date(roster_players: list[dict[str, Any]]) -> Optional[int
 def find_initial_squad_ids(
     roster_players: list[dict[str, Any]], user_transactions: list
 ) -> set[int]:
-    """Combina "sigue desde el reparto" (plantilla actual sin owner.price)
-    con "lo tenía desde el reparto y lo vendió" (venta sin compra previa
+    """Combina "sigue desde el reparto" (plantilla actual sin owner.price o con precio cero)
+    con "lo tenía desde el reparto y lo vendió" (venta anterior a la primera compra
     registrada), usando player_id para evitar ambigüedades de nombre."""
     current_no_price_ids = {
-        entry["id"] for entry in roster_players if "price" not in (entry.get("owner") or {})
+        entry["id"] for entry in roster_players if (entry.get("owner") or {}).get("price") in (None, 0)
     }
-    bought_ids = {t.player_id for t in user_transactions if t.role == "compra" and t.player_id}
-    sold_ids = {t.player_id for t in user_transactions if t.role == "venta" and t.player_id}
-    sold_without_bought_ids = sold_ids - bought_ids
+    first_roles = {}
+    for transaction in sorted(user_transactions, key=lambda t: t.date):
+        if transaction.player_id:
+            first_roles.setdefault(transaction.player_id, transaction.role)
+    sold_without_bought_ids = {pid for pid, role in first_roles.items() if role == "venta"}
 
     return current_no_price_ids | sold_without_bought_ids
 
@@ -125,19 +103,18 @@ def compute_initial_budget(
     missing = 0
     for pid in squad_ids:
         player = players_by_id.get(pid)
-        if not player:
-            missing += 1
-            continue
         price_on_date = None
         if date_code:
-            history = price_history_fetcher(player.slug)
+            # El detalle público acepta también el ID, incluso cuando el
+            # jugador ya no aparece en el catálogo de la competición.
+            history = price_history_fetcher(player.slug if player else str(pid))
             match = next((p for p in history if p[0] == date_code), None)
             price_on_date = match[1] if match else None
         if price_on_date is None:
             missing += 1
         else:
             total += price_on_date
-        squad.append(InitialSquadPlayer(player_id=pid, name=player.name, price_on_start_date=price_on_date))
+        squad.append(InitialSquadPlayer(player_id=pid, name=player.name if player else f"#{pid}", price_on_start_date=price_on_date))
 
     return InitialBudgetResult(
         season_start_date=start_date,

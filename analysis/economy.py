@@ -25,12 +25,52 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 
+# Referencias aportadas por el usuario. Se conservan fechadas, sin tratarlas
+# como consultas actuales de la API ni ajustar el modelo para igualarlas.
+REPORTED_BALANCES = {14097561: (9_460_000, "20/09/2026")}
+
+
+def balance_summary(estimated, api_balance=None, reported=None, tolerance=200_000):
+    """Prioriza el saldo consultado; mantiene aparte referencias históricas."""
+    confirmed = api_balance if api_balance is not None else reported[0] if reported else None
+    gap = confirmed - estimated if confirmed is not None and estimated is not None else None
+    return {
+        "Saldo actual": api_balance if api_balance is not None else estimated,
+        "Tipo de saldo": "Real consultado" if api_balance is not None else "Estimado" if estimated is not None else "No disponible",
+        "Saldo confirmado": confirmed,
+        "Fuente de confirmación": "API · consulta actual" if api_balance is not None else f"Comunicado · {reported[1]}" if reported else "Sin confirmar",
+        "Diferencia (real − estimado)": gap,
+        "Comparación ±200.000 €": "Sin referencia comparable" if gap is None else "Dentro del margen" if abs(gap) <= tolerance else "Fuera del margen",
+    }
+
+
 @dataclass
 class MoneyEvent:
     date: int
     kind: str  # "bonus" | "compra" | "venta"
     label: str
     delta: int  # positivo = ingreso, negativo = gasto
+
+
+def clause_costs_by_user(board_items, players_by_id=None):
+    """El amount del blindaje es dinero gastado, no la nueva cláusula."""
+    events = {}
+    for item in board_items:
+        if item.get("type") != "clauseIncrement":
+            continue
+        for entry in item.get("content") or []:
+            uid = (entry.get("user") or {}).get("id")
+            amount = entry.get("amount")
+            if uid is None or amount is None:
+                continue
+            pid = entry.get("player")
+            player = (players_by_id or {}).get(pid)
+            events.setdefault(uid, []).append(MoneyEvent(
+                date=item["date"], kind="blindaje",
+                label=f"Subida de cláusula: {player.name if player else f'#{pid}'}",
+                delta=-amount,
+            ))
+    return events
 
 
 def round_bonuses_by_user(board_items: list[dict[str, Any]]) -> dict[int, list[MoneyEvent]]:
@@ -59,10 +99,11 @@ def build_money_timeline(
     user_id: int,
     round_bonus_events: list[MoneyEvent],
     transactions: list,  # list[scouting.UserTransaction] del mismo usuario
+    extra_events: Optional[list[MoneyEvent]] = None,
 ) -> list[MoneyEvent]:
     """Combina bonus de jornada + compras/ventas en una única línea temporal
     ordenada por fecha, con el signo correcto en "delta"."""
-    events = list(round_bonus_events)
+    events = list(round_bonus_events) + list(extra_events or [])
     for t in transactions:
         if t.role == "compra":
             events.append(MoneyEvent(date=t.date, kind="compra", label=f"Fichaje: {t.jugador}", delta=-t.price))

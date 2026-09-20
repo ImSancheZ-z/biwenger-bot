@@ -8,6 +8,7 @@ sub-recursos vía el parámetro "fields".
 from __future__ import annotations
 
 import time
+from email.utils import parsedate_to_datetime
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -49,6 +50,31 @@ class ProbeResult:
 
 
 class BiwengerClient:
+    # Compartido por todas las sesiones de este proceso Streamlit.
+    _public_retry_at = 0.0
+
+    @classmethod
+    def _check_public_cooldown(cls):
+        remaining = cls._public_retry_at - time.time()
+        if remaining > 0:
+            raise BiwengerCatalogError(
+                f"Biwenger limita las consultas (HTTP 429). Próximo intento permitido en {int(remaining) + 1} segundos."
+            )
+
+    @classmethod
+    def _record_rate_limit(cls, response):
+        wait = 600.0
+        retry_after = response.headers.get("Retry-After")
+        if retry_after:
+            try:
+                wait = max(wait, float(retry_after))
+            except (ValueError, TypeError):
+                try:
+                    wait = max(wait, parsedate_to_datetime(retry_after).timestamp() - time.time())
+                except (ValueError, TypeError, OverflowError):
+                    pass
+        cls._public_retry_at = max(cls._public_retry_at, time.time() + wait)
+
     MY_TEAM_FIELDS = (
         "*,lineup(type,playersID,reservesID,captain,striker,coach,date),"
         "players(id,owner),market,offers,-trophies"
@@ -157,6 +183,7 @@ class BiwengerClient:
         vuelve 403 "Forbidden" — confirmado empíricamente. Por eso aquí se
         manda una petición nueva con solo las cabeceras públicas.
         """
+        self._check_public_cooldown()
         failures = []
         # Ambos hosts sirven el mismo catálogo público (verificado 13/09/2026).
         # Peticiones nuevas: nunca enviar Authorization/X-League/X-User.
@@ -176,6 +203,7 @@ class BiwengerClient:
                 failures.append(f"{host}: HTTP {resp.status_code}")
                 # No insistir si el servicio pide reducir peticiones.
                 if resp.status_code == 429:
+                    self._record_rate_limit(resp)
                     break
                 if resp.status_code == 403 or resp.status_code >= 500:
                     continue
@@ -204,12 +232,18 @@ class BiwengerClient:
         EXACTO de un jugador en una fecha pasada, en vez de aproximarlo con
         el precio de catálogo de hoy.
         """
+        self._check_public_cooldown()
         resp = requests.get(
             f"{CDN_BASE}/players/la-liga/{slug}",
             params={"lang": "es", "fields": "prices"},
             headers=DEFAULT_HEADERS,
             timeout=15,
         )
+        if resp.status_code == 404:
+            return []  # Jugador sin histórico público recuperable.
+        if resp.status_code == 429:
+            self._record_rate_limit(resp)
+            self._check_public_cooldown()
         resp.raise_for_status()
         return resp.json().get("data", {}).get("prices", [])
 

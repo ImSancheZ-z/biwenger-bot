@@ -8,7 +8,7 @@ from biwenger.client import BiwengerClient, BiwengerCatalogError, CDN_BASE, AUTH
 
 
 def response(status, payload=None):
-    return Mock(status_code=status, json=Mock(return_value=payload))
+    return Mock(status_code=status, headers={}, json=Mock(return_value=payload))
 
 
 class CatalogTests(unittest.TestCase):
@@ -23,8 +23,39 @@ class CatalogTests(unittest.TestCase):
             exec(compile(ast.Module(body=imports, type_ignores=[]), "app.py", "exec"), {})
 
     def setUp(self):
+        BiwengerClient._public_retry_at = 0
         self.client = BiwengerClient("", "")
         self.payload = {"data": {"players": {"1": {"id": 1}}}}
+
+    def tearDown(self):
+        BiwengerClient._public_retry_at = 0
+
+    @patch("biwenger.client.time.time", return_value=1000)
+    @patch("biwenger.client.requests.get")
+    def test_rate_limit_pauses_catalog_and_history_across_clients(self, get, now):
+        limited = response(429)
+        limited.headers = {"Retry-After": "1200"}
+        get.return_value = limited
+        with self.assertRaises(BiwengerCatalogError):
+            self.client.get_competition_data()
+        other = BiwengerClient("", "")
+        with self.assertRaises(BiwengerCatalogError):
+            other.get_competition_data()
+        with self.assertRaises(BiwengerCatalogError):
+            other.get_player_price_history("example")
+        self.assertEqual(get.call_count, 1)
+        now.return_value = 2201
+        get.return_value = response(200, self.payload)
+        self.assertEqual(other.get_competition_data(), self.payload)
+
+    @patch("biwenger.client.requests.get")
+    def test_history_rate_limit_also_pauses_catalog(self, get):
+        get.return_value = response(429)
+        with self.assertRaises(BiwengerCatalogError):
+            self.client.get_player_price_history("example")
+        with self.assertRaises(BiwengerCatalogError):
+            self.client.get_competition_data()
+        self.assertEqual(get.call_count, 1)
 
     @patch("biwenger.client.requests.get")
     def test_fallback_and_no_private_headers(self, get):

@@ -1,6 +1,21 @@
 # Biwenger Bot
 
-## Mercado: recomendador v2 (septiembre de 2026)
+## Estado actual: rollback del mercado (13/09/2026)
+
+Se ha restaurado el panel del commit `5d03f1e`, confirmado por el usuario,
+conservando la variación diaria oficial. El recomendador v2 queda en el código
+para revisión, pero no se ejecuta desde el panel: añadía consultas de históricos
+de subastas y producción empezó a devolver HTTP 429. No se ha demostrado que
+sea la única causa (Streamlit puede compartir IP con otras aplicaciones).
+
+Ante un 429 del catálogo o los históricos públicos, se pausan las consultas
+públicas en todo el proceso durante al menos 10 minutos, respetando un plazo
+mayor de `Retry-After`. Recargar no elimina esa pausa. Un reinicio del proceso
+sí pierde este estado; no se recomienda reiniciar repetidamente. La pausa no
+garantiza que el proveedor levante el límite. Se conserva el host alternativo
+para errores 403/5xx, sin cambiar de host ante un 429.
+
+## Recomendador v2 retirado del panel: diseño y auditoría
 
 El mercado activo separa el **importe competitivo** del **límite personal**.
 Normaliza la mayor oferta rival de cada subasta por el precio histórico anterior
@@ -343,10 +358,10 @@ así:
 
 1. **Detectar qué jugadores fueron del reparto inicial de un usuario**: los
    de su plantilla actual sin `owner.price` en `GET /user/{id}` (nunca
-   comprados/vendidos por él) + los que vendió sin haberlos comprado nunca
+   comprados/vendidos por él) + los que vendió antes de su primera compra registrada
    (los tenía desde el reparto). Se cruza por `player_id`, no por nombre.
-2. **La fecha del reparto** es la misma para TODA la liga — se calcula UNA
-   vez a partir de tu propia plantilla y se reutiliza para todos. (Bug real
+2. **La fecha del reparto** es la misma para TODA la liga — se busca entre todas
+   las plantillas disponibles y se reutiliza para todos. (Bug real
    que esto corrige: al principio la recalculábamos por usuario a partir de
    su plantilla actual, y fallaba con usuarios que ya habían vendido TODOS
    sus jugadores originales — ningún jugador sin `owner.price` del que
@@ -359,32 +374,74 @@ así:
    que el usuario encontró en las DevTools y da el histórico diario de
    precio de un jugador (~366 días, formato `[fecha_AAMMDD, precio]`).
 
-### Verificación (el único caso comprobable)
+### Revisión de economía (20/09/2026)
 
-Solo se puede verificar contra la cuenta del propio usuario, porque es el
-único saldo real conocido (`GET /market` → `status.balance`). El proceso de
-validación, en orden:
+El saldo se calcula como **40M − valor del reparto + bonus + ventas − compras − blindajes**.
+Los eventos `clauseIncrement` descuentan `amount`, el dinero pagado por subir la cláusula;
+no se descuenta el valor total de la nueva cláusula. Antes se omitían estos gastos.
+La fecha del reparto se busca entre todas las plantillas disponibles, porque la propia
+cuenta puede haber vendido ya todos sus jugadores iniciales. Una venta anterior a
+la primera compra identifica un jugador del reparto aunque después se recompre.
 
-| Método de valoración de la plantilla inicial | Saldo inicial predicho | Diferencia vs. saldo real (13.520.000 €) |
-|---|---|---|
-| Precio de HOY, solo plantilla actual (sin contar vendidos) | 27.750.000 € | 14.230.000 € |
-| Precio de HOY, incluyendo vendidos sin comprar | 15.500.000 € | 1.980.000 € |
-| Precio EXACTO del día del reparto, incluyendo vendidos | 14.120.000 € | **600.000 €** |
+Comprobación actualizada con datos consultados el 20/09/2026 para UnTrollConUnPlan:
 
-El error final (600.000 € sobre una plantilla de ~26M€, ≈1,5%) se explica
-por un único jugador (`#37714`) que ya no aparece en el catálogo actual de
-LaLiga (probablemente descendido o fuera de competición), no por un fallo
-del método — confirma que la regla de los 40M es correcta.
+| Concepto | Importe |
+|---|---:|
+| Saldo inicial (todos los precios recuperados) | 13.960.000 € |
+| Bonus | +18.600.138 € |
+| Ventas | +70.750.844 € |
+| Compras | −87.750.559 € |
+| Blindajes antes omitidos | −6.000.000 € |
+| Saldo estimado | **9.560.423 €** |
+| Saldo confirmado por el usuario, no verificado por API | 9.460.000 € |
 
-### Limitación que persiste
+La diferencia es de **+100.423 €**, dentro del margen de comparación de
+**±200.000 €** indicado por el usuario. No se ha identificado la causa de ese
+residuo y no se aplica ningún ajuste artificial para igualar los saldos.
 
-Para el resto de usuarios **no hay forma de verificar el resultado final**
-(su saldo real sigue oculto por `settings.balance = "hidden"`), así que ese
-mismo margen de ~1-2% por jugadores sin precio histórico recuperable es la
-mejor estimación de precisión disponible, no una certeza. Si un usuario ya
-no está en la liga, su plantilla deja de ser consultable (`GET /user/{id}`
-devuelve 404) y para él se muestra solo el flujo de caja neto acumulado
-desde 0 (`analysis.economy.cumulative_flow()`), como en la v1 original.
+El jugador ausente del catálogo era **Juanlu (#25396)**. Su detalle público
+`GET /players/la-liga/25396?fields=id,name,slug,prices` sigue disponible:
+su precio del **06/08/2026 era 880.000 €**. Ahora el cálculo consulta por ID
+los históricos de jugadores ausentes del catálogo y solo acepta el precio
+del día exacto del reparto. Un 404 se trata como histórico no disponible.
+La referencia confirmada está fechada y no se actualiza automáticamente.
+
+La tabla muestra cada componente, el saldo real propio y su diferencia con el modelo.
+Los rivales tienen el saldo real oculto en la API. Cuando falta el reparto, se deja el
+saldo estimado vacío y se muestra el flujo neto por separado. El detalle permite
+revisar precios ausentes y movimientos; las series vacías no interrumpen la pestaña.
+
+### Aplicación a toda la liga (20/09/2026)
+
+La reconstrucción incluye también jugadores iniciales con `owner.price = 0`.
+Algunos blindajes conservan esa representación explícita del precio, por lo que
+comprobar solo la ausencia de `price` omitía jugadores del reparto.
+
+La tabla prioriza **Saldo actual**: el real consultado de la cuenta propia o la
+estimación de cada rival, identificado en **Tipo de saldo**. **Saldo confirmado**
+conserva por separado las referencias disponibles, su fuente y fecha. No se
+rellenan saldos reales desconocidos con cifras calculadas. El margen de 200.000 €
+es una comparación con referencias, no un intervalo de confianza del modelo.
+
+La auditoría `python scripts/audit_economy.py` revisó los diez usuarios activos:
+
+| Participante | Saldo estimado | Precios ausentes |
+|---|---:|---:|
+| Los Chusitos | 11.243.327 € | 0 |
+| Lamin Gamal | 7.686.388 € | 0 |
+| Mariet | −2.624.087 € | 0 |
+| Vivago | 1.672.669 € | 0 |
+| Rynosuke Sato | −3.635.304 € | 0 |
+| UnTrollConUnPlan | 9.560.423 € | 0 |
+| Morocco's Nightmare | 2.060.969 € | 0 |
+| Apareció LARATA | −8.664.627 € | 0 |
+| Vinicius Jr | 1.509.400 € | 1 |
+| Escuadrón 11 | 8.252.569 € | 2 |
+
+Saldo real propio consultado: **7.236.388 €**, con una diferencia pendiente de
+**450.000 €** frente a la estimación, fuera del margen. Los saldos de Vinicius Jr
+y Escuadrón 11 son provisionales por los precios ausentes. El antiguo participante
+“Usuario” no tiene plantilla consultable (404); se conserva solo su flujo neto.
 
 ## Si más adelante se automatiza con GitHub Actions
 
