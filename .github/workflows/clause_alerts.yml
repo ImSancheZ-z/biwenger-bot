@@ -1,0 +1,48 @@
+name: Clause alerts
+
+on:
+  schedule:
+    # 09:00 hora de Madrid = 07:00 UTC (CEST) o 08:00 UTC (CET). Se programan
+    # ambas y el primer paso descarta la que no toque.
+    - cron: "0 7 * * *"
+    - cron: "0 8 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  alert:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Comprobar que son las 9h en Madrid
+        id: check
+        run: |
+          hour="$(TZ=Europe/Madrid date +%H)"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "$hour" = "09" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.check.outputs.run == 'true'
+
+      - uses: actions/setup-python@v5
+        if: steps.check.outputs.run == 'true'
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependencias
+        if: steps.check.outputs.run == 'true'
+        run: pip install -r requirements.txt
+
+      - name: Avisar de cláusulas próximas
+        if: steps.check.outputs.run == 'true'
+        env:
+          BIWENGER_EMAIL: ${{ secrets.BIWENGER_EMAIL }}
+          BIWENGER_PASSWORD: ${{ secrets.BIWENGER_PASSWORD }}
+          BIWENGER_LEAGUE_ID: ${{ secrets.BIWENGER_LEAGUE_ID }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python scripts/clause_alerts.py
