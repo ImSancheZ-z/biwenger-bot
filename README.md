@@ -90,8 +90,8 @@ python scripts/fetch_daily.py
 
 Descarga el catálogo público de jugadores de LaLiga (sin necesidad de login)
 y guarda un snapshot del día en `biwenger_data.sqlite3`. Pensado para
-ejecutarse una vez al día (Task Scheduler, cron, o más adelante GitHub
-Actions).
+ejecutarse una vez al día (a mano, con cron, o con el workflow **Daily
+snapshot** de GitHub Actions).
 
 ## Dashboard
 
@@ -443,16 +443,40 @@ Saldo real propio consultado: **7.236.388 €**, con una diferencia pendiente de
 y Escuadrón 11 son provisionales por los precios ausentes. El antiguo participante
 “Usuario” no tiene plantilla consultable (404); se conserva solo su flujo neto.
 
-## Si más adelante se automatiza con GitHub Actions
+## GitHub Actions
 
-No está montado todavía. Para cuando se quiera:
-- Las credenciales van como *Secrets* del repo (`BIWENGER_EMAIL`,
-  `BIWENGER_PASSWORD`), añadidos por ti desde la web de GitHub o con
-  `gh secret set` — nunca pegados en el chat ni en el código.
-- El workflow ejecutaría `scripts/fetch_daily.py` con esos secrets como
-  variables de entorno y haría commit del `.sqlite3` actualizado (o lo
-  subiría a un artifact/storage externo si el histórico crece mucho).
-- Cosas a probar primero: si Cloudflare bloquea también IPs de los runners
-  de GitHub Actions (algunos rangos están en listas negras) — si pasa,
-  habría que valorar un proxy o ejecutar el fetch en un runner
-  self-hosted.
+Está montado, en `.github/workflows/`. GitHub no cumple la hora pedida: el
+cron puede arrancar varias horas tarde, y Actions no mueve la hora con el
+horario de verano. Por eso cada workflow tiene dos cron en UTC (CET y CEST)
+y, al empezar, mira si **la fecha de hoy en Europe/Madrid ya está reservada**
+en un fichero del propio repo. El primer run escribe esa fecha, hace push y
+solo entonces hace el trabajo. El otro cron del mismo día ve el marcador y
+termina sin llamar a Biwenger: como mucho una ejecución real al día, para no
+provocar 429. Vale cualquier hora de ese día; un umbral más temprano
+volvería a saltarse los runs que GitHub suelta por la tarde.
+
+La reserva se escribe justo antes de llamar a la API. Si el run falla antes
+(por ejemplo al instalar dependencias), todavía no hay marcador y el otro
+cron puede hacer el trabajo. Si falla después de reservar, ese cron ya no
+reintenta: una sola llamada a Biwenger por día. Para repetirlo igualmente:
+*Run workflow* (`workflow_dispatch`). El disparo manual ignora el marcador y
+siempre ejecuta el trabajo. La zona del job es `Europe/Madrid`, así el día
+del snapshot coincide con el del marcador.
+
+- **Daily snapshot** (`.github/workflows/daily_fetch.yml`), orientado a las
+  07:10 de Madrid. Ejecuta `scripts/fetch_daily.py`. El catálogo es público:
+  este workflow no usa secrets. Si `biwenger_data.sqlite3` cambia, hace
+  commit `chore: snapshot diario AAAA-MM-DD`. El marcador es
+  `.github/state/daily-snapshot-date`.
+- **Clause alerts** (`.github/workflows/clause_alerts.yml`), orientado a las
+  09:00 de Madrid. Ejecuta `scripts/clause_alerts.py` y manda el Telegram
+  cuando hay cláusulas que avisar. Secrets del repo: `BIWENGER_EMAIL`,
+  `BIWENGER_PASSWORD`, `BIWENGER_LEAGUE_ID` (opcional), `TELEGRAM_BOT_TOKEN`,
+  `TELEGRAM_CHAT_ID`. El marcador es `.github/state/clause-alerts-date`.
+
+Los secrets se crean en la web de GitHub o con `gh secret set`. No van en
+el código ni en el chat. Un *Run workflow* manual del 26/10 llegó a
+Telegram, así que las credenciales y la salida a Biwenger desde los runners
+funcionan. Si más adelante Cloudflare responde 403 a una IP de Actions, ese
+día no se repite solo: tocaría lanzarlo a mano o pasar a un proxy / runner
+self-hosted.

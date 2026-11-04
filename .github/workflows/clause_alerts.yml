@@ -2,43 +2,56 @@ name: Clause alerts
 
 on:
   schedule:
-    # 09:00 hora de Madrid = 07:00 UTC (CEST) o 08:00 UTC (CET). Se programan
-    # ambas y el primer paso descarta la que no toque.
+    # 09:00 en Madrid es 07:00 UTC (CEST) o 08:00 UTC (CET). Misma idea que
+    # el snapshot: dos cron por el horario de verano, y el arranque real
+    # puede caer por la tarde. El primero reserva la fecha de Madrid y
+    # envía el aviso; el otro no vuelve a entrar en Biwenger. Se acepta
+    # cualquier hora de ese día (un corte más temprano volvería a saltarse
+    # los runs retrasados). workflow_dispatch no mira el marcador.
     - cron: "0 7 * * *"
     - cron: "0 8 * * *"
   workflow_dispatch: {}
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   alert:
     runs-on: ubuntu-latest
+    env:
+      TZ: Europe/Madrid
     steps:
-      - name: Comprobar que son las 9h en Madrid
-        id: check
-        run: |
-          hour="$(TZ=Europe/Madrid date +%H)"
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "$hour" = "09" ]; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "run=false" >> "$GITHUB_OUTPUT"
-          fi
-
       - uses: actions/checkout@v4
-        if: steps.check.outputs.run == 'true'
+        with:
+          fetch-depth: 0
+
+      - name: Configurar git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Ver si el aviso de hoy (Madrid) ya está hecho
+        id: pre
+        run: |
+          bash .github/scripts/claim_madrid_day.sh peek .github/state/clause-alerts-date
 
       - uses: actions/setup-python@v5
-        if: steps.check.outputs.run == 'true'
+        if: success() && steps.pre.outputs.run == 'true'
         with:
           python-version: "3.12"
 
       - name: Instalar dependencias
-        if: steps.check.outputs.run == 'true'
+        if: success() && steps.pre.outputs.run == 'true'
         run: pip install -r requirements.txt
 
+      - name: Reservar el día antes de llamar a la API
+        id: check
+        if: success() && steps.pre.outputs.run == 'true'
+        run: |
+          bash .github/scripts/claim_madrid_day.sh .github/state/clause-alerts-date "chore: reservar avisos de cláusulas"
+
       - name: Avisar de cláusulas próximas
-        if: steps.check.outputs.run == 'true'
+        if: success() && steps.check.outputs.run == 'true'
         env:
           BIWENGER_EMAIL: ${{ secrets.BIWENGER_EMAIL }}
           BIWENGER_PASSWORD: ${{ secrets.BIWENGER_PASSWORD }}

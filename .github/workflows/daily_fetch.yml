@@ -2,9 +2,12 @@ name: Daily snapshot
 
 on:
   schedule:
-    # 07:10 hora de Madrid cae en 05:10 UTC (CEST, verano) o 06:10 UTC (CET,
-    # invierno). GitHub Actions no ajusta horario de verano, así que
-    # programamos ambas y el primer paso descarta la que no toque.
+    # 07:10 en Madrid es 05:10 UTC (CEST) o 06:10 UTC (CET). Actions no
+    # ajusta el horario de verano y, además, el cron suele arrancar horas
+    # tarde. Se dejan los dos disparos: el primero que corre reserva la
+    # fecha de Madrid y descarga; el otro ve el marcador y no llama a la
+    # API. Cualquier hora de ese día vale. workflow_dispatch no mira el
+    # marcador.
     - cron: "10 5 * * *"
     - cron: "10 6 * * *"
   workflow_dispatch: {}
@@ -15,39 +18,52 @@ permissions:
 jobs:
   fetch:
     runs-on: ubuntu-latest
+    env:
+      # date.today() del snapshot usa la zona del proceso. Sin esto el
+      # runner (UTC) guardaría el día anterior si el job cruza la medianoche
+      # de Madrid.
+      TZ: Europe/Madrid
     steps:
-      - name: Comprobar que son las 7h en Madrid
-        id: check
-        run: |
-          hour="$(TZ=Europe/Madrid date +%H)"
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "$hour" = "07" ]; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "Hora actual en Madrid: $hour:xx, no toca ejecutar en este disparo."
-            echo "run=false" >> "$GITHUB_OUTPUT"
-          fi
-
       - uses: actions/checkout@v4
-        if: steps.check.outputs.run == 'true'
+        with:
+          fetch-depth: 0
+
+      - name: Configurar git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Ver si el snapshot de hoy (Madrid) ya está hecho
+        id: pre
+        run: |
+          bash .github/scripts/claim_madrid_day.sh peek .github/state/daily-snapshot-date
 
       - uses: actions/setup-python@v5
-        if: steps.check.outputs.run == 'true'
+        if: success() && steps.pre.outputs.run == 'true'
         with:
           python-version: "3.12"
 
       - name: Instalar dependencias
-        if: steps.check.outputs.run == 'true'
+        if: success() && steps.pre.outputs.run == 'true'
         run: pip install -r requirements.txt
 
+      - name: Reservar el día antes de llamar a la API
+        id: check
+        if: success() && steps.pre.outputs.run == 'true'
+        run: |
+          bash .github/scripts/claim_madrid_day.sh .github/state/daily-snapshot-date "chore: reservar snapshot diario"
+
       - name: Descargar snapshot diario
-        if: steps.check.outputs.run == 'true'
+        if: success() && steps.check.outputs.run == 'true'
         run: python scripts/fetch_daily.py
 
       - name: Commit y push si hay cambios
-        if: steps.check.outputs.run == 'true'
+        if: success() && steps.check.outputs.run == 'true'
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add biwenger_data.sqlite3
-          git diff --staged --quiet && echo "Sin cambios" || git commit -m "chore: snapshot diario $(date -u +%F)"
-          git push
+          git add -- biwenger_data.sqlite3
+          if git diff --staged --quiet -- biwenger_data.sqlite3; then
+            echo "Sin cambios en el snapshot"
+          else
+            git commit -m "chore: snapshot diario $(TZ=Europe/Madrid date +%F)" --only -- biwenger_data.sqlite3
+            bash .github/scripts/claim_madrid_day.sh push
+          fi
