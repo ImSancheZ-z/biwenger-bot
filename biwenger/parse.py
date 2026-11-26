@@ -144,6 +144,7 @@ def parse_standings(league_data: dict[str, Any]) -> list[dict[str, Any]]:
                 "team_value": entry.get("teamValue"),
                 "team_value_change": entry.get("teamValueInc"),
                 "last_positions": entry.get("lastPositions"),
+                "icon": entry.get("icon"),
             }
         )
     return rows
@@ -238,6 +239,7 @@ def parse_movements(moves: list[dict[str, Any]], players_by_id: dict[int, Player
             rows.append(
                 {
                     "date": date,
+                    "player_id": pid,
                     "tipo": label,
                     "jugador": player.name if player else (f"#{pid}" if pid else "?"),
                     "importe": amount,

@@ -54,7 +54,11 @@ posición utiliza el catálogo disponible al ejecutar la auditoría.
 Ejecutar `python scripts/audit_market_v2.py` para repetir la auditoría de lectura
 (requiere credenciales). Pruebas: `python -m unittest discover -s tests -v`.
 La primera carga del mercado consulta los históricos de las subastas; se cachean
-24 horas y el tablón 10 minutos. El score antiguo sigue en Chollos y Cláusulas.
+24 horas y el tablón 10 minutos. El panel cachea también 10 minutos la plantilla
+propia, el mercado activo, la clasificación y las plantillas de la liga, para que
+mover un filtro no repita esas lecturas. Las fotos (`/i/p/{id}.png`) y los escudos
+(`/i/t/{id}.png`) los pide el navegador al CDN de Biwenger: no son llamadas a la
+API de datos. El score antiguo sigue en Chollos y Cláusulas.
 
 Asistente local de análisis para Biwenger (LaLiga Fantasy): detecta jugadores
 con buena relación puntos/precio, guarda snapshots diarios de precios y los
@@ -101,7 +105,8 @@ streamlit run app.py
 
 Pestañas:
 - **Catálogo LaLiga**: todos los jugadores de LaLiga, filtrable por
-  posición/estado/equipo.
+  posición/estado/equipo, con foto, escudo y la variación diaria oficial.
+  Arriba, las doce mayores subidas de hoy.
 - **Chollos (recomendaciones)**: ranking por el motor de `analysis/engine.py`.
 - **Mi plantilla**: alineación actual, cláusulas y qué jugadores tienes en venta.
 - **Mercado activo (liga)**: jugadores en venta ahora mismo en tu liga
@@ -109,11 +114,14 @@ Pestañas:
   ofertas de compra pendientes.
 - **Cláusulas** (`analysis/clauses.py`): jugadores de OTROS usuarios de tu
   liga cuya cláusula ya se puede pagar o se podrá en los próximos días
-  (elegible), valorados con el mismo score, tendencia de precio y
-  comparación con precio de mercado que el resto del dashboard. Sale de
-  `owner.clause`/`owner.clauseLockedUntil` en la plantilla de cada usuario
-  (mecánica "clause: steal" de tu liga). Filtrable por posición y por
-  propietario actual. Incluye una segunda tabla de **arbitraje**: jugadores
+  (elegible). La vista de arriba no pide históricos: tarjetas y tabla con
+  foto, escudo, avatar del dueño, cláusulas ejecutables ahora y las que se
+  abren en 48 h, con fecha en hora de Madrid y el tiempo que falta. Debajo
+  sigue el análisis de siempre (score, tendencia de precio y comparación
+  con el mercado), y ese sí usa el histórico cacheado 24 h, solo para el
+  plazo del deslizador. Sale de `owner.clause`/`owner.clauseLockedUntil`
+  en la plantilla de cada usuario (mecánica "clause: steal" de tu liga).
+  Filtrable por posición y por propietario actual. Incluye una segunda tabla de **arbitraje**: jugadores
   con cláusula ≤ precio de mercado actual Y precio subiendo día a día —
   clausularlos y venderlos al mercado al día siguiente deja beneficio casi
   seguro, sea o no un buen jugador (estrategia de trading, no de
@@ -122,8 +130,11 @@ Pestañas:
   vs. mercado) en vez de por valor absoluto, para que ninguna señal domine
   solo por tener una escala más grande. Las columnas de tendencia se
   colorean en verde/rojo y muestran tanto el % como el valor en euros/día.
-- **Clasificación**: posición y puntos de todos los usuarios de tu liga.
-- **Movimientos de liga**: histórico de fichajes/ventas de tu liga.
+- **Clasificación**: posición, puntos y valor de plantilla de tu liga, con
+  avatar y dos barras (valor y variación) a partir de los mismos campos.
+- **Movimientos de liga**: histórico de fichajes/ventas de tu liga, con foto
+  del jugador y, arriba, los clausulazos de los últimos 7 días que ya vienen
+  en ese tablón. No se inventa un cupo semanal.
 - **Fichajes por usuario** (`analysis/scouting.py`): qué compra/vende cada
   rival, con tendencias detectadas en texto (agresividad en subastas,
   posición favorita, si paga por encima o por debajo del precio de mercado

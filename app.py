@@ -30,6 +30,29 @@ from analysis.bidding import (
     recommend_bid,
 )
 from analysis.clauses import find_clause_opportunities, score_opportunities
+from analysis.present import (
+    availability_label,
+    catalog_kpis,
+    recent_clause_moves,
+    spanish_datetime_label,
+    split_clause_window,
+    squad_kpis,
+    top_daily_risers,
+    within_hours,
+)
+from biwenger.images import player_photo_url, team_shield_url, user_avatar_url
+from biwenger.panel_ui import (
+    THEME_CSS,
+    clause_visual,
+    header_html,
+    kpi_html,
+    note_html,
+    render_clause_table,
+    render_recent_clauses,
+    render_riser_table,
+    render_soon_cards,
+    section_header,
+)
 from analysis.economy import (
     REPORTED_BALANCES,
     balance_summary,
@@ -127,6 +150,42 @@ def style_table(
     return styler
 
 
+IMAGE_COLUMNS = {
+    "Foto": st.column_config.ImageColumn("Foto", width="small"),
+    "Escudo": st.column_config.ImageColumn("Escudo", width="small"),
+    "Avatar": st.column_config.ImageColumn("Avatar", width="small"),
+}
+
+
+def show_html(fragment: str) -> None:
+    st.markdown(fragment, unsafe_allow_html=True)
+
+
+def show_table(
+    df: pd.DataFrame,
+    money_columns: Optional[list[str]] = None,
+    signed_money_columns: Optional[list[str]] = None,
+    trend_color_columns: Optional[list[str]] = None,
+    pct_columns: Optional[list[str]] = None,
+    height: Optional[int] = None,
+    **kwargs,
+):
+    """Tabla de Streamlit con euros formateados y fotos/escudos si existen."""
+    styled = style_table(
+        df,
+        money_columns=money_columns,
+        signed_money_columns=signed_money_columns,
+        trend_color_columns=trend_color_columns,
+        pct_columns=pct_columns,
+    )
+    config = {name: column for name, column in IMAGE_COLUMNS.items() if name in df.columns}
+    kwargs.setdefault("width", "stretch")
+    kwargs.setdefault("hide_index", True)
+    if height is not None:
+        kwargs["height"] = height
+    st.dataframe(styled, column_config=config, **kwargs)
+
+
 @st.cache_data(ttl=600)
 def load_competition_data():
     """Cachea la respuesta de la API, no objetos Player de versiones anteriores."""
@@ -163,16 +222,65 @@ def load_player_price_history(slug: str) -> list:
     return client.get_player_price_history(slug)
 
 
+@st.cache_data(ttl=600)
+def load_my_team_response(email: str, password: str, league_id: str | None):
+    """Plantilla propia. 10 minutos: los filtros del panel no deben reloguear."""
+    return get_authed_client(email, password, league_id).get_my_team()
+
+
+@st.cache_data(ttl=600)
+def load_market_response(email: str, password: str, league_id: str | None):
+    return get_authed_client(email, password, league_id).get_market()
+
+
+@st.cache_data(ttl=600)
+def load_standings_response(email: str, password: str, league_id: str | None):
+    return get_authed_client(email, password, league_id).get_league_standings()
+
+
+@st.cache_data(ttl=600)
+def load_movements_response(email: str, password: str, league_id: str | None, page_size: int, max_pages: int):
+    return get_authed_client(email, password, league_id).get_all_league_movements(
+        page_size=page_size, max_pages=max_pages
+    )
+
+
+@st.cache_data(ttl=600)
+def load_rosters_response(email: str, password: str, league_id: str | None):
+    """Plantillas de la liga, reutilizadas 10 minutos entre pestañas y filtros.
+
+    Un usuario que ya no existe se omite. El fallo de la plantilla propia
+    o de la clasificación sí se propaga: sin eso no hay cláusulas que mostrar.
+    """
+    client = get_authed_client(email, password, league_id)
+    standings = load_standings_response(email, password, league_id)
+    mine = load_my_team_response(email, password, league_id)
+    my_id = client.league_user_id
+    rosters = {my_id: mine["data"]}
+    for entry in standings.get("data", {}).get("standings", []):
+        uid = entry.get("id")
+        if uid is None or uid == my_id:
+            continue
+        try:
+            rosters[uid] = client.get_other_user_roster(uid)["data"]
+        except Exception:
+            continue
+    return rosters, my_id, standings
+
+
 def players_to_dataframe(players) -> pd.DataFrame:
     rows = []
     for p in players:
         fixture = p.next_fixture
         rows.append(
             {
+                "Foto": player_photo_url(p.id),
                 "Nombre": p.name,
+                "Escudo": team_shield_url(p.team_id),
                 "Equipo": p.team_name,
                 "Posición": p.position_name,
                 "Precio": p.price,
+                "Variación diaria": p.price_increment,
                 "Puntos": p.points,
                 "Pts/Millón": round(p.points_per_million, 2) if p.points_per_million else None,
                 "Forma reciente": p.recent_form,
@@ -186,7 +294,23 @@ def players_to_dataframe(players) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-st.title("⚽ Biwenger Bot — Análisis de mercado")
+show_html(THEME_CSS)
+show_html(header_html("Biwenger Bot", f"Análisis de mercado · {spanish_datetime_label()}"))
+
+try:
+    players = load_players()
+except requests.RequestException as exc:
+    response = getattr(exc, "response", None)
+    status = f" (HTTP {response.status_code})" if response is not None else ""
+    st.error(getattr(exc, "public_message", f"No se pudo descargar el catálogo de Biwenger{status}."))
+    st.info("Las consultas se pausan al recibir HTTP 429 durante al menos 10 minutos, o más si Biwenger lo indica. Vuelve a abrir la app después de ese plazo. Recargar no elimina la pausa y no garantiza que el servidor haya levantado el límite.")
+    st.stop()
+
+show_html(kpi_html(catalog_kpis(players)))
+show_html(note_html(
+    "Fotos y escudos salen del CDN público de Biwenger, sin peticiones extra a la API. "
+    "Plantilla, mercado, clasificación y tablón se reutilizan 10 minutos."
+))
 
 (
     tab_clauses,
@@ -212,17 +336,11 @@ st.title("⚽ Biwenger Bot — Análisis de mercado")
     ]
 )
 
-try:
-    players = load_players()
-except requests.RequestException as exc:
-    response = getattr(exc, "response", None)
-    status = f" (HTTP {response.status_code})" if response is not None else ""
-    st.error(getattr(exc, "public_message", f"No se pudo descargar el catálogo de Biwenger{status}."))
-    st.info("Las consultas se pausan al recibir HTTP 429 durante al menos 10 minutos, o más si Biwenger lo indica. Vuelve a abrir la app después de ese plazo. Recargar no elimina la pausa y no garantiza que el servidor haya levantado el límite.")
-    st.stop()
-
 with tab_market:
     st.subheader("Todos los jugadores de LaLiga")
+    show_html(section_header("Mayores subidas de hoy"))
+    show_html(render_riser_table(top_daily_risers(players)))
+    st.caption("Variación diaria oficial del catálogo (priceIncrement), no una media de los últimos días.")
     df = players_to_dataframe(players)
 
     col1, col2, col3 = st.columns(3)
@@ -243,9 +361,11 @@ with tab_market:
     if team_filter:
         filtered = filtered[filtered["Equipo"].str.contains(team_filter, case=False, na=False)]
 
-    st.dataframe(
-        style_money(filtered.sort_values("Puntos", ascending=False), ["Precio"]),
-        width='stretch',
+    show_table(
+        filtered.sort_values("Puntos", ascending=False),
+        money_columns=["Precio"],
+        signed_money_columns=["Variación diaria"],
+        trend_color_columns=["Variación diaria"],
         height=600,
     )
 
@@ -271,7 +391,9 @@ with tab_chollos:
         fixture = p.next_fixture
         rows.append(
             {
+                "Foto": player_photo_url(p.id),
                 "Nombre": p.name,
+                "Escudo": team_shield_url(p.team_id),
                 "Equipo": p.team_name,
                 "Posición": p.position_name,
                 "Precio": p.price,
@@ -283,11 +405,7 @@ with tab_chollos:
                 "Score": round(sp.score, 2),
             }
         )
-    st.dataframe(
-        style_money(pd.DataFrame(rows), ["Precio"]),
-        width='stretch',
-        height=600,
-    )
+    show_table(pd.DataFrame(rows), money_columns=["Precio"], height=600)
 
 players_by_id = {p.id: p for p in players}
 
@@ -295,12 +413,16 @@ with tab_team:
     st.subheader("Mi plantilla")
     try:
         settings = load_settings()
-        client = get_authed_client(settings.email, settings.password, settings.league_id)
-        team_resp = client.get_my_team()
+        team_resp = load_my_team_response(settings.email, settings.password, settings.league_id)
         team_data = team_resp.get("data", {})
 
         rows = parse_my_team(team_data, players_by_id)
-        team_df = pd.DataFrame(rows).rename(
+        team_df = pd.DataFrame(rows)
+        team_df.insert(0, "Foto", team_df["id"].map(player_photo_url))
+        team_df.insert(2, "Escudo", team_df["id"].map(
+            lambda pid: team_shield_url(players_by_id[pid].team_id) if pid in players_by_id else None
+        ))
+        team_df = team_df.rename(
             columns={
                 "name": "Nombre",
                 "team_name": "Equipo",
@@ -313,19 +435,15 @@ with tab_team:
             }
         ).drop(columns=["id", "position", "clause_locked_until"])
         st.caption(f"Alineación: {team_data.get('lineup', {}).get('type', '?')}")
-        st.dataframe(
-            style_money(team_df, ["Precio", "Cláusula"]),
-            width='stretch',
-            height=450,
-        )
+        show_table(team_df, money_columns=["Precio", "Cláusula"], height=450)
 
         st.divider()
         st.markdown("#### Estado de las cláusulas de mi plantilla")
         st.caption(
-            "Días que faltan para que cualquier rival pueda pagar la cláusula de "
-            "cada jugador (robártelo), y diferencia entre el precio de mercado "
-            "actual y esa cláusula — cuanto mayor sea, más caro le saldría a un "
-            "rival robártelo respecto a lo que vale el jugador hoy."
+            "Fecha y tiempo que faltan para que un rival pueda pagar la cláusula "
+            "y llevárselo, y diferencia entre el precio de mercado actual y esa "
+            "cláusula. Cuanto mayor sea el beneficio, más caro le sale robártelo "
+            "respecto a lo que vale el jugador hoy."
         )
         now_ts = int(time.time())
         clause_rows = []
@@ -340,7 +458,9 @@ with tab_team:
             trend_abs = player.price_increment if player else None
             clause_rows.append(
                 {
+                    "Foto": player_photo_url(r.get("id")),
                     "Nombre": r["name"],
+                    "Escudo": team_shield_url(player.team_id) if player else None,
                     "Equipo": r["team_name"],
                     "Posición": r["position_name"],
                     "Precio mercado": price,
@@ -348,7 +468,7 @@ with tab_team:
                     "Beneficio inmediato": (price - clause) if price else None,
                     "% vs. mercado": round((clause / price - 1) * 100, 1) if price else None,
                     "Variación diaria (€)": trend_abs,
-                    "Disponible para rivales": "Ya" if days_left <= 0 else f"en {days_left:.1f} días",
+                    "Disponible para rivales": availability_label(locked_until, now_ts),
                     "_dias": days_left,
                 }
             )
@@ -356,15 +476,12 @@ with tab_team:
             st.info("Ninguno de tus jugadores tiene cláusula asignada.")
         else:
             clause_status_df = pd.DataFrame(clause_rows).sort_values("_dias").drop(columns=["_dias"])
-            st.dataframe(
-                style_table(
-                    clause_status_df,
-                    money_columns=["Precio mercado", "Cláusula"],
-                    signed_money_columns=["Beneficio inmediato", "Variación diaria (€)"],
-                    trend_color_columns=["Beneficio inmediato", "Variación diaria (€)"],
-                    pct_columns=["% vs. mercado"],
-                ),
-                width='stretch',
+            show_table(
+                clause_status_df,
+                money_columns=["Precio mercado", "Cláusula"],
+                signed_money_columns=["Beneficio inmediato", "Variación diaria (€)"],
+                trend_color_columns=["Beneficio inmediato", "Variación diaria (€)"],
+                pct_columns=["% vs. mercado"],
                 height=450,
             )
 
@@ -384,24 +501,24 @@ with tab_active_market:
     st.caption("Jugadores en venta ahora mismo: libres del sistema o puestos por otros usuarios.")
     try:
         settings = load_settings()
-        client = get_authed_client(settings.email, settings.password, settings.league_id)
-        market_resp = client.get_market()
+        market_resp = load_market_response(settings.email, settings.password, settings.league_id)
         market_data = market_resp.get("data", {})
 
         status = market_data.get("status", {})
         balance = status.get("balance", 0)
         max_bid = status.get("maximumBid", 0)
-        col1, col2 = st.columns(2)
-        col1.metric("Tu saldo", format_euro(balance))
-        col2.metric("Puja máxima permitida", format_euro(max_bid))
+        show_html(kpi_html([
+            ("Tu saldo", format_euro(balance), "disponible ahora"),
+            ("Puja máxima", format_euro(max_bid), "tope que impone Biwenger"),
+        ]))
 
         # Para la puja recomendada necesitamos tu plantilla (qué posiciones te
         # faltan) y el histórico real de subastas competidas de tu liga.
-        my_team_resp = client.get_my_team()
+        my_team_resp = load_my_team_response(settings.email, settings.password, settings.league_id)
         my_squad_rows = parse_my_team(my_team_resp.get("data", {}), players_by_id)
         position_counts = squad_position_counts(my_squad_rows)
 
-        movements = client.get_all_league_movements(page_size=50, max_pages=5)
+        movements = load_movements_response(settings.email, settings.password, settings.league_id, 50, 5)
         observed_premium, n_samples = historical_bid_premium(movements)
         premium, premium_note = effective_premium(observed_premium, n_samples)
 
@@ -420,10 +537,14 @@ with tab_active_market:
         elif origen_filter == "De otros usuarios":
             rows = [r for r in rows if not r["is_free_agent"]]
 
+        now_ts = int(time.time())
         for row in rows:
             trend = None
             player = players_by_id.get(row["id"])
             trend_abs = player.price_increment if player else None
+            row["foto"] = player_photo_url(row["id"])
+            row["escudo"] = team_shield_url(player.team_id) if player else None
+            row["cierra"] = availability_label(row.get("hasta"), now_ts) if row.get("hasta") else "Sin cierre"
             if row["slug"]:
                 history = load_player_price_history(row["slug"])
                 trend = price_trend_pct_per_day(history)
@@ -448,9 +569,14 @@ with tab_active_market:
             row["puja_recomendada"] = rec.amount
             row["motivo"] = rec.reasoning
 
-        market_df = pd.DataFrame(rows).rename(
+        if not rows:
+            st.info("No hay jugadores en venta con ese filtro.")
+        else:
+            market_df = pd.DataFrame(rows).rename(
             columns={
+                "foto": "Foto",
                 "name": "Nombre",
+                "escudo": "Escudo",
                 "team_name": "Equipo",
                 "position_name": "Posición",
                 "points": "Puntos",
@@ -461,27 +587,27 @@ with tab_active_market:
                 "tendencia_abs": "Variación diaria (€)",
                 "excepcional": "Top-5 + titular",
                 "vendedor": "Vendedor",
-                "hasta": "Hasta (timestamp)",
+                "cierra": "Cierra",
                 "accion": "Acción",
                 "puja_recomendada": "Puja recomendada",
                 "motivo": "Motivo",
             }
-        ).drop(columns=["id", "slug", "position", "is_free_agent"])
-        st.caption(
-            "Ordenado por 'Score chollo'. La 'Puja recomendada' es una estimación v1 — "
-            "ver limitaciones en el desplegable de abajo. La variación diaria es el último cambio oficial de Biwenger; la tendencia media usa los últimos 7 registros del histórico."
-        )
-        st.dataframe(
-            style_table(
+            ).drop(columns=["id", "slug", "position", "is_free_agent", "hasta"])
+            preferred = ["Foto", "Nombre", "Escudo", "Equipo", "Posición", "Puntos", "Precio de venta", "Cierra"]
+            ordered = [c for c in preferred if c in market_df.columns] + [c for c in market_df.columns if c not in preferred]
+            market_df = market_df[ordered]
+            st.caption(
+                "Ordenado por 'Score chollo'. 'Cierra' es la fecha límite de la puja y el tiempo que falta. "
+                "La variación diaria es el último cambio oficial de Biwenger; la tendencia media usa los últimos 7 registros del histórico."
+            )
+            show_table(
                 market_df.sort_values("Score chollo", ascending=False, na_position="last"),
                 money_columns=["Precio de venta", "Puja recomendada"],
                 signed_money_columns=["Variación diaria (€)"],
                 trend_color_columns=["Tendencia media (%/día)", "Variación diaria (€)"],
                 pct_columns=["Tendencia media (%/día)"],
-            ),
-            width='stretch',
-            height=500,
-        )
+                height=500,
+            )
 
         with st.expander("¿Cómo se calcula la puja recomendada? Limitaciones"):
             st.markdown(
@@ -543,25 +669,64 @@ with tab_clauses:
     )
     try:
         settings = load_settings()
-        client = get_authed_client(settings.email, settings.password, settings.league_id)
-        my_id = client.league_user_id
+        with st.spinner("Revisando las plantillas de todos los usuarios de tu liga..."):
+            rosters, my_id, standings_resp = load_rosters_response(
+                settings.email, settings.password, settings.league_id
+            )
+        now_ts = int(time.time())
+        owner_icons = {
+            entry.get("id"): entry.get("icon")
+            for entry in standings_resp.get("data", {}).get("standings", [])
+        }
+        # La vista visual usa solo catálogo + plantillas ya descargadas.
+        # El histórico de precios se pide más abajo, y solo para el plazo del análisis.
+        window = find_clause_opportunities(rosters, players_by_id, my_id, within_days=2, now_ts=now_ts)
+        open_now, upcoming = split_clause_window(window)
+        show_html(kpi_html(squad_kpis(rosters, players, len(open_now), len(upcoming))))
 
+        visual_owners = ["Todos"] + sorted({o.owner_name for o in open_now + upcoming})
+        visual_positions = ["Todas"] + list(POSITION_NAMES.values())
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            visual_owner = st.selectbox("Propietario", visual_owners, key="clauses_visual_owner")
+        with col2:
+            visual_pos = st.selectbox("Posición", visual_positions, key="clauses_visual_pos")
+        with col3:
+            min_millions = st.number_input("Valor mínimo (M)", min_value=0.0, value=0.0, step=0.5, key="clauses_min_m")
+
+        def _visible(opp) -> bool:
+            if visual_owner != "Todos" and opp.owner_name != visual_owner:
+                return False
+            if visual_pos != "Todas" and opp.player.position_name != visual_pos:
+                return False
+            return (opp.player.price or 0) >= min_millions * 1_000_000
+
+        open_view = [o for o in open_now if _visible(o)]
+        show_html(section_header("Cláusulas ejecutables ahora"))
+        st.caption(f"{len(open_view)} jugadores con cláusula ejecutable")
+        show_html(render_clause_table(
+            [clause_visual(o, owner_icons.get(o.owner_id), now_ts) for o in open_view],
+            countdown=False,
+        ))
+
+        show_html(section_header("Próximas a poder ejecutarse"))
+        max_hours = st.slider("Máximo de horas restantes", 1, 48, 48, key="clauses_max_hours")
+        soon_view = [o for o in upcoming if _visible(o) and within_hours(o, max_hours)]
+        st.caption(f"{len(soon_view)} cláusulas dentro del plazo. La cifra grande es el tiempo que falta.")
+        show_html(render_soon_cards([clause_visual(o, owner_icons.get(o.owner_id), now_ts) for o in soon_view]))
+        show_html(render_clause_table(
+            [clause_visual(o, owner_icons.get(o.owner_id), now_ts) for o in soon_view],
+            countdown=True,
+        ))
+
+        st.divider()
+        show_html(section_header("Análisis: score, arbitraje y combinaciones"))
         within_days = st.slider("Ver cláusulas que se desbloqueen dentro de (días)", 0, 15, 3)
 
-        standings_resp = client.get_league_standings()
-        all_user_ids = [s["id"] for s in standings_resp.get("data", {}).get("standings", [])]
-
-        with st.spinner("Revisando las plantillas de todos los usuarios de tu liga..."):
-            rosters = {my_id: client.get_my_team()["data"]}
-            for uid in all_user_ids:
-                if uid == my_id:
-                    continue
-                try:
-                    rosters[uid] = client.get_other_user_roster(uid)["data"]
-                except Exception:  # noqa: BLE001 — usuario fantasma u otro fallo puntual, se omite
-                    continue
-
-            opportunities = find_clause_opportunities(rosters, players_by_id, my_id, within_days=within_days)
+        with st.spinner("Valorando cláusulas con el histórico de precio..."):
+            opportunities = find_clause_opportunities(
+                rosters, players_by_id, my_id, within_days=within_days, now_ts=now_ts
+            )
             score_opportunities(opportunities, load_player_price_history)
 
         if not opportunities:
@@ -583,7 +748,9 @@ with tab_clauses:
 
             rows = [
                 {
+                    "Foto": player_photo_url(o.player.id),
                     "Jugador": o.player.name,
+                    "Escudo": team_shield_url(o.player.team_id),
                     "Equipo": o.player.team_name,
                     "Posición": o.player.position_name,
                     "Precio mercado": o.player.price,
@@ -592,7 +759,7 @@ with tab_clauses:
                     "% vs. mercado": o.vs_market_pct,
                     "Variación diaria (€)": o.trend_abs_per_day,
                     "Tendencia media (%/día)": round(o.trend_pct_per_day, 2) if o.trend_pct_per_day is not None else None,
-                    "Disponible": "Ya" if o.days_until_unlockable <= 0 else f"en {o.days_until_unlockable:.1f} días",
+                    "Disponible": availability_label(o.clause_locked_until, now_ts),
                     "Score": o.score,
                     "Recomendación": o.recomendacion,
                     "Dueño actual": o.owner_name,
@@ -605,15 +772,12 @@ with tab_clauses:
             else:
                 clauses_df = pd.DataFrame(rows).sort_values("Score", ascending=False, na_position="last")
                 st.caption(f"{len(filtered_opps)} de {len(opportunities)} oportunidades, ordenadas por score.")
-                st.dataframe(
-                    style_table(
-                        clauses_df,
-                        money_columns=["Precio mercado", "Cláusula"],
-                        signed_money_columns=["Variación diaria (€)", "Beneficio inmediato"],
-                        trend_color_columns=["Tendencia media (%/día)", "Variación diaria (€)", "Beneficio inmediato"],
-                        pct_columns=["% vs. mercado", "Tendencia media (%/día)"],
-                    ),
-                    width='stretch',
+                show_table(
+                    clauses_df,
+                    money_columns=["Precio mercado", "Cláusula"],
+                    signed_money_columns=["Variación diaria (€)", "Beneficio inmediato"],
+                    trend_color_columns=["Tendencia media (%/día)", "Variación diaria (€)", "Beneficio inmediato"],
+                    pct_columns=["% vs. mercado", "Tendencia media (%/día)"],
                     height=550,
                 )
 
@@ -639,7 +803,9 @@ with tab_clauses:
             else:
                 arb_rows = [
                     {
+                        "Foto": player_photo_url(o.player.id),
                         "Jugador": o.player.name,
+                        "Escudo": team_shield_url(o.player.team_id),
                         "Equipo": o.player.team_name,
                         "Posición": o.player.position_name,
                         "Precio mercado": o.player.price,
@@ -648,21 +814,18 @@ with tab_clauses:
                         "% vs. mercado": o.vs_market_pct,
                         "Variación diaria (€)": o.trend_abs_per_day,
                         "Tendencia media (%/día)": round(o.trend_pct_per_day, 2),
-                        "Disponible": "Ya" if o.days_until_unlockable <= 0 else f"en {o.days_until_unlockable:.1f} días",
+                        "Disponible": availability_label(o.clause_locked_until, now_ts),
                         "Dueño actual": o.owner_name,
                     }
                     for o in arbitrage_opps
                 ]
                 arb_df = pd.DataFrame(arb_rows).sort_values("Tendencia media (%/día)", ascending=False)
-                st.dataframe(
-                    style_table(
-                        arb_df,
-                        money_columns=["Cláusula", "Precio mercado", "Beneficio inmediato"],
-                        signed_money_columns=["Variación diaria (€)"],
-                        trend_color_columns=["Tendencia media (%/día)", "Variación diaria (€)"],
-                        pct_columns=["% vs. mercado", "Tendencia media (%/día)"],
-                    ),
-                    width='stretch',
+                show_table(
+                    arb_df,
+                    money_columns=["Cláusula", "Precio mercado", "Beneficio inmediato"],
+                    signed_money_columns=["Variación diaria (€)"],
+                    trend_color_columns=["Tendencia media (%/día)", "Variación diaria (€)"],
+                    pct_columns=["% vs. mercado", "Tendencia media (%/día)"],
                     height=350,
                 )
 
@@ -689,7 +852,9 @@ with tab_clauses:
             else:
                 combo_rows = [
                     {
+                        "Foto": player_photo_url(o.player.id),
                         "Jugador": o.player.name,
+                        "Escudo": team_shield_url(o.player.team_id),
                         "Equipo": o.player.team_name,
                         "Posición": o.player.position_name,
                         "Precio mercado": o.player.price,
@@ -698,7 +863,7 @@ with tab_clauses:
                         "% vs. mercado": o.vs_market_pct,
                         "Variación diaria (€)": o.trend_abs_per_day,
                         "Tendencia media (%/día)": round(o.trend_pct_per_day, 2),
-                        "Disponible": "Ya" if o.days_until_unlockable <= 0 else f"en {o.days_until_unlockable:.1f} días",
+                        "Disponible": availability_label(o.clause_locked_until, now_ts),
                         "Score": o.score,
                         "Dueño actual": o.owner_name,
                     }
@@ -710,15 +875,12 @@ with tab_clauses:
                 rank_descuento = combo_df["% vs. mercado"].rank(ascending=True)
                 combo_df["Posición combinada"] = (rank_subida + rank_score + rank_descuento).round(1)
                 combo_df = combo_df.sort_values("Posición combinada")
-                st.dataframe(
-                    style_table(
-                        combo_df,
-                        money_columns=["Precio mercado", "Cláusula"],
-                        signed_money_columns=["Variación diaria (€)", "Beneficio inmediato"],
-                        trend_color_columns=["Tendencia media (%/día)", "Variación diaria (€)", "Beneficio inmediato"],
-                        pct_columns=["% vs. mercado", "Tendencia media (%/día)"],
-                    ),
-                    width='stretch',
+                show_table(
+                    combo_df,
+                    money_columns=["Precio mercado", "Cláusula"],
+                    signed_money_columns=["Variación diaria (€)", "Beneficio inmediato"],
+                    trend_color_columns=["Tendencia media (%/día)", "Variación diaria (€)", "Beneficio inmediato"],
+                    pct_columns=["% vs. mercado", "Tendencia media (%/día)"],
                     height=400,
                 )
 
@@ -738,7 +900,9 @@ with tab_clauses:
             else:
                 tight_rows = [
                     {
+                        "Foto": player_photo_url(o.player.id),
                         "Jugador": o.player.name,
+                        "Escudo": team_shield_url(o.player.team_id),
                         "Equipo": o.player.team_name,
                         "Posición": o.player.position_name,
                         "Precio mercado": o.player.price,
@@ -747,7 +911,7 @@ with tab_clauses:
                         "% vs. mercado": o.vs_market_pct,
                         "Variación diaria (€)": o.trend_abs_per_day,
                         "Tendencia media (%/día)": round(o.trend_pct_per_day, 2),
-                        "Disponible": "Ya" if o.days_until_unlockable <= 0 else f"en {o.days_until_unlockable:.1f} días",
+                        "Disponible": availability_label(o.clause_locked_until, now_ts),
                         "Score": o.score,
                         "Dueño actual": o.owner_name,
                     }
@@ -758,15 +922,12 @@ with tab_clauses:
                 rank_tendencia = tight_df["Tendencia media (%/día)"].rank(ascending=False)
                 tight_df["Posición combinada"] = (rank_beneficio + rank_tendencia).round(1)
                 tight_df = tight_df.sort_values("Posición combinada")
-                st.dataframe(
-                    style_table(
-                        tight_df,
-                        money_columns=["Precio mercado", "Cláusula"],
-                        signed_money_columns=["Variación diaria (€)", "Beneficio inmediato"],
-                        trend_color_columns=["Tendencia media (%/día)", "Variación diaria (€)", "Beneficio inmediato"],
-                        pct_columns=["% vs. mercado", "Tendencia media (%/día)"],
-                    ),
-                    width='stretch',
+                show_table(
+                    tight_df,
+                    money_columns=["Precio mercado", "Cláusula"],
+                    signed_money_columns=["Variación diaria (€)", "Beneficio inmediato"],
+                    trend_color_columns=["Tendencia media (%/día)", "Variación diaria (€)", "Beneficio inmediato"],
+                    pct_columns=["% vs. mercado", "Tendencia media (%/día)"],
                     height=400,
                 )
 
@@ -774,8 +935,9 @@ with tab_clauses:
             st.markdown(
                 "- **Cláusula pagable**: se compara `owner.clauseLockedUntil` (fecha "
                 "hasta la que NADIE puede pagarla) con la fecha límite que elijas. "
-                "Se excluyen tus propios jugadores — no tiene sentido pagarte la "
-                "cláusula a ti mismo.\n"
+                "Arriba, la cuenta atrás muestra la fecha en hora de Madrid y el "
+                "tiempo que falta. Se excluyen tus propios jugadores — no tiene "
+                "sentido pagarte la cláusula a ti mismo.\n"
                 "- **Score**: el mismo motor de `analysis/engine.py` que en las "
                 "pestañas de Chollos y Mercado activo, aplicado al precio de la "
                 "cláusula en vez de al de catálogo.\n"
@@ -809,11 +971,13 @@ with tab_standings:
     st.subheader("Clasificación de la liga")
     try:
         settings = load_settings()
-        client = get_authed_client(settings.email, settings.password, settings.league_id)
-        standings_resp = client.get_league_standings()
+        standings_resp = load_standings_response(settings.email, settings.password, settings.league_id)
         rows = parse_standings(standings_resp.get("data", {}))
-        standings_df = pd.DataFrame(rows).sort_values("position").drop(columns=["user_id"])
-        standings_df = standings_df.rename(
+        standings_df = pd.DataFrame(rows).sort_values("position")
+        standings_df.insert(0, "Avatar", [
+            user_avatar_url(icon, uid) for icon, uid in zip(standings_df["icon"], standings_df["user_id"])
+        ])
+        standings_df = standings_df.drop(columns=["user_id", "icon"]).rename(
             columns={
                 "position": "Posición",
                 "position_change": "+/- última jornada",
@@ -825,10 +989,22 @@ with tab_standings:
                 "last_positions": "Posiciones anteriores",
             }
         )
-        st.dataframe(
-            style_money(standings_df, ["Valor plantilla", "Variación valor"]),
-            width='stretch',
-            hide_index=True,
+        show_html(section_header("Valor de las plantillas"))
+        chart = standings_df.set_index("Usuario")[["Valor plantilla", "Variación valor"]].apply(
+            pd.to_numeric, errors="coerce"
+        ).fillna(0)
+        left, right = st.columns(2)
+        with left:
+            st.caption("Valor de plantilla")
+            st.bar_chart(chart[["Valor plantilla"]], height=280)
+        with right:
+            st.caption("Variación de valor")
+            st.bar_chart(chart[["Variación valor"]], height=280)
+        show_table(
+            standings_df,
+            money_columns=["Valor plantilla"],
+            signed_money_columns=["Variación valor"],
+            trend_color_columns=["Variación valor"],
         )
     except RuntimeError as exc:
         st.warning(f"Configura tu .env para ver esto: {exc}")
@@ -844,13 +1020,21 @@ with tab_moves:
     )
     try:
         settings = load_settings()
-        client = get_authed_client(settings.email, settings.password, settings.league_id)
-        moves = client.get_all_league_movements(page_size=50, max_pages=20)
+        moves = load_movements_response(settings.email, settings.password, settings.league_id, 50, 20)
 
         rows = parse_movements(moves, players_by_id)
+        show_html(section_header("Clausulazos de los últimos 7 días"))
+        show_html(render_recent_clauses(recent_clause_moves(rows, int(time.time())), players_by_id))
+        st.caption(
+            "Usa el tablón que ya carga esta pestaña. No se asume un cupo semanal: "
+            "cada liga lo fija aparte y este panel no tiene ese dato confirmado."
+        )
         if rows:
             moves_df = pd.DataFrame(rows)
             moves_df["fecha"] = pd.to_datetime(moves_df["date"], unit="s")
+            moves_df["Foto"] = moves_df["player_id"].map(
+                lambda pid: None if pid is None or (isinstance(pid, float) and pd.isna(pid)) else player_photo_url(pid)
+            )
             moves_df["pujas_perdedoras"] = moves_df["pujas_perdedoras"].apply(
                 lambda v: ", ".join(format_euro(x) for x in v) if v else "-"
             )
@@ -864,12 +1048,8 @@ with tab_moves:
                     "a": "A",
                     "pujas_perdedoras": "Pujas perdedoras (perdió la subasta)",
                 }
-            )[["Fecha", "Tipo", "Jugador", "Importe", "De", "A", "Pujas perdedoras (perdió la subasta)"]]
-            st.dataframe(
-                style_money(display_df, ["Importe"]),
-                width='stretch',
-                height=500,
-            )
+            )[["Foto", "Fecha", "Tipo", "Jugador", "Importe", "De", "A", "Pujas perdedoras (perdió la subasta)"]]
+            show_table(display_df, money_columns=["Importe"], height=500)
         else:
             st.info("Tu liga todavía no tiene fichajes o ventas registrados esta temporada.")
     except RuntimeError as exc:
@@ -885,8 +1065,7 @@ with tab_scouting:
     )
     try:
         settings = load_settings()
-        client = get_authed_client(settings.email, settings.password, settings.league_id)
-        moves = client.get_all_league_movements(page_size=50, max_pages=20)
+        moves = load_movements_response(settings.email, settings.password, settings.league_id, 50, 20)
         users_activity = build_user_activity(moves, players_by_id)
 
         overview_rows = []
